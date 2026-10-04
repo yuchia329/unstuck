@@ -128,6 +128,28 @@ func (r *Registry) Register(ctx context.Context, wallet, nonce, signature string
 	return reg, nil
 }
 
+// ForWallet returns the id of the Customer with wallet, creating the Customer
+// if there is none. Nothing proves the caller owns the wallet, so this is
+// only for a backend with payments off, where a Customer has nothing to
+// spend. A Customer created here has an API key nobody knows; registering the
+// wallet issues a real one.
+func (r *Registry) ForWallet(ctx context.Context, wallet string) (string, error) {
+	if !solana.IsPubkey(wallet) {
+		return "", ErrInvalidWallet
+	}
+	var id string
+	// On conflict the existing row is returned as it was.
+	err := r.db.QueryRowContext(ctx,
+		`INSERT INTO customers (id, wallet, api_key_hash, created_at) VALUES (?, ?, ?, ?)
+		 ON CONFLICT (wallet) DO UPDATE SET wallet = excluded.wallet
+		 RETURNING id`,
+		secret.New("cus_"), wallet, secret.Hash(secret.New("unstuck_")), time.Now().UnixMilli()).Scan(&id)
+	if err != nil {
+		return "", fmt.Errorf("customer for wallet: %w", err)
+	}
+	return id, nil
+}
+
 // Authenticate resolves an API key to its Customer id.
 func (r *Registry) Authenticate(ctx context.Context, apiKey string) (string, error) {
 	var id string

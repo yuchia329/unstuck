@@ -302,7 +302,8 @@ function handle(m) {
       break;
     case "task_solved":
       if (claim && claim.id === m.task_id) claim = null;
-      notice(`Solved! Earning of ${usdc(m.earning)} USDC recorded.`);
+      // With payments off a Task is free and earns nothing.
+      notice(m.earning ? `Solved! Earning of ${usdc(m.earning)} USDC recorded.` : "Solved!");
       loadEarnings();
       break;
     case "rtc_answer":

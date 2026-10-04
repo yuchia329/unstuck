@@ -8,6 +8,10 @@ on the Queue page, controls the Agent's browser remotely from a phone or
 desktop, and clears the Challenge. The Agent then carries on. The Customer
 pays 0.01 USDC per solved Task from a prepaid Balance on Solana.
 
+Payments are off by default: Tasks are free, nothing touches Solana, and an
+Agent needs only a wallet address, no API key. See
+[Payments off](#payments-off).
+
 ```ts
 import { solve } from "@unstuck/bridge";
 
@@ -22,6 +26,7 @@ Terms like Task, Hold and Session have exact meanings here. See
 ## Contents
 
 - [How it works](#how-it-works)
+- [Payments off](#payments-off)
 - [System architecture](#system-architecture)
 - [Repository layout](#repository-layout)
 - [Run the demo locally](#run-the-demo-locally)
@@ -152,6 +157,31 @@ flowchart LR
   sent, and it fails only when the transaction failed on chain or can no
   longer land. A failed Withdrawal's Earnings are available again.
 
+## Payments off
+
+The backend charges nothing unless it is started with `-payments`. The
+sections above describe a backend with payments on. With payments off:
+
+- **No Hold.** `POST /v1/tasks` never returns 402. A Solved Task earns the
+  Solver nothing and no Fee is taken.
+- **Nothing touches Solana.** The Deposit poller does not run and
+  Withdrawals answer `503 withdrawals_disabled`, whatever `-rpc-url` and
+  `-payout-keypair` say. Balances and Earnings already in the database stay
+  as they are.
+- **No API key needed.** An Agent may name its Customer by Solana wallet
+  address alone: set `UNSTUCK_WALLET`, or pass `solve(page, { wallet })`.
+  The backend creates the Customer the first time it sees the wallet. The
+  wallet stays the Customer's identity, so Deposits and an API key can
+  follow later by registering it.
+- **Nothing proves the wallet.** Anyone can create Tasks under any wallet
+  address. They can see nothing of that Customer: `GET /v1/balance`, which
+  lists a Customer's Tasks, still needs the API key. An API key still works
+  for creating Tasks too.
+
+A Task keeps the terms it was created under. One with a Hold is captured or
+released as usual after a restart with payments off, and one without a Hold
+ends without moving money after a restart with payments on.
+
 ## System architecture
 
 ```mermaid
@@ -231,7 +261,7 @@ dependency. Without it, Sessions stay relayed.
 | `POST /v1/customers/challenge`   | none        | Get a registration challenge to sign        |
 | `POST /v1/customers`             | signature   | Register a wallet and get an API key         |
 | `GET /v1/balance`                | API key     | Available and held Balance                   |
-| `POST /v1/tasks`                 | API key     | Create a Task (402 if Balance is too low)    |
+| `POST /v1/tasks`                 | API key, or `wallet` in the body with payments off | Create a Task (402 if Balance is too low) |
 | `GET /v1/tasks/{id}/bridge`      | session token | Bridge WebSocket                           |
 | `GET /v1/queue?wallet=...`       | none        | Solver Queue WebSocket                       |
 | `GET /v1/solvers/{wallet}/earnings` | none     | Available Earnings and recent Withdrawals    |
@@ -282,18 +312,27 @@ If an old server is still on port 8080, stop it first:
 lsof -ti tcp:8080 | xargs kill
 ```
 
-Then start the backend in one of two modes.
+Then start the backend in one of three modes.
+
+**Payments off (the default).** Tasks are free. Skip steps 2 and 3 and give
+the Agent a wallet address in place of an API key:
+
+```sh
+go run ./cmd/unstuck -claim-window 30s -solve-window 60s
+export UNSTUCK_WALLET=<any Solana wallet address>   # in the Agent's terminal
+```
 
 **With real USDC Deposits.** The backend polls Solana mainnet every 5s:
 
 ```sh
-go run ./cmd/unstuck -claim-window 30s -solve-window 60s
+go run ./cmd/unstuck -payments -claim-window 30s -solve-window 60s
 ```
 
-**Without real USDC.** Deposit polling is off and free dev credit is on:
+**Payments on, without real USDC.** Deposit polling is off and free dev
+credit is on:
 
 ```sh
-go run ./cmd/unstuck -claim-window 30s -solve-window 60s -dev -rpc-url ""
+go run ./cmd/unstuck -payments -claim-window 30s -solve-window 60s -dev -rpc-url ""
 ```
 
 State lives in `unstuck.db` in the current directory (change it with
@@ -302,8 +341,9 @@ over.
 
 ### 2. Register the Customer (once per database)
 
-The pay CLI cannot sign messages, so export the keypair and let
-`unstuck-register` sign the challenge:
+Needed only with payments on, or to read `GET /v1/balance`. The pay CLI
+cannot sign messages, so export the keypair and let `unstuck-register` sign
+the challenge:
 
 ```sh
 pay account export local                      # writes ./pay-account-local-<pubkey>.json
@@ -318,6 +358,8 @@ export UNSTUCK_API_KEY=unstuck_...
 ```
 
 ### 3. Fund the Balance
+
+Needed only with payments on.
 
 **Real Deposit.** Send USDC from the registered wallet to the service
 wallet. The backend sees it about 5s after confirmation:
@@ -374,8 +416,8 @@ A Chromium window opens and the Agent creates a Task. On the phone:
    desktop. To type, tap a field on the Agent's page, then use the
    "Tap here to type" box (on a computer, just type). If the Task did not
    finish by itself, tap **Done** and the Agent checks the page.
-4. The phone shows "Solved! Earning of 0.008 USDC recorded." and the Agent
-   continues.
+4. The phone shows "Solved!" (with payments on, "Solved! Earning of 0.008
+   USDC recorded.") and the Agent continues.
 
 If the phone's connection drops, reopen the URL and connect with the same
 wallet before the solve window ends. The Session resumes.
@@ -406,8 +448,12 @@ Needs [uv](https://docs.astral.sh/uv/), a TypeSafe key
 
 ```sh
 cd bridge
-TYPESAFE_API_KEY=… GEMINI_API_KEY=… UNSTUCK_API_KEY=… npm run demo:jev
+TYPESAFE_API_KEY=… GEMINI_API_KEY=… UNSTUCK_WALLET=… npm run demo:jev
 ```
+
+With payments on, set `UNSTUCK_API_KEY` in place of `UNSTUCK_WALLET`.
+[jev_start_example.sh](jev_start_example.sh) is a launcher for the public
+backend: copy it and fill in the keys and the wallet address.
 
 The first run launches a separate Chrome with its own profile in
 `~/.unstuck/jev-chrome` and a debugging port on 9335. Leave it open between
@@ -487,6 +533,10 @@ to clear the Challenge.
   bridge address `10.42.0.1:8080`. Traefik, the host and pods can reach it;
   the internet cannot. The instance's `cni0` must be `10.42.0.1`, the k3s
   default.
+- **No `-payments`.** The unit starts the backend with payments off, so
+  Tasks are free and an Agent needs only `UNSTUCK_WALLET`. Steps 2 and 3
+  apply once `-payments` is added to
+  [deploy/unstuck.service](deploy/unstuck.service).
 - **No `-dev`.** `POST /v1/dev/credit` returns 404. Balance comes only from
   real Deposits.
 - **Keepalive pings.** The backend pings every socket every 20s. Cloudflare
@@ -517,6 +567,7 @@ Flags for `cmd/unstuck`:
 | `-db`             | `unstuck.db`                         | SQLite path                                          |
 | `-claim-window`   | `60s`                                 | Time in the Queue before a Task Expires              |
 | `-solve-window`   | `120s`                                | Time after Claim before a Task Fails                 |
+| `-payments`       | off                                   | Charge Customers and pay Solvers. Off, see [Payments off](#payments-off) |
 | `-price`          | `10000`                               | USDC base units held per Task (0.01 USDC)            |
 | `-service-wallet` | `CW82aTE…GhGt`                        | Wallet that receives Deposits                        |
 | `-rpc-url`        | Solana mainnet                        | RPC polled for Deposits (empty turns polling off)    |
@@ -535,6 +586,7 @@ Flags for `cmd/unstuck`:
 | Option    | Default                                   | Meaning                                  |
 | --------- | ----------------------------------------- | ---------------------------------------- |
 | `apiKey`  | `$UNSTUCK_API_KEY`                       | Customer API key                         |
+| `wallet`  | `$UNSTUCK_WALLET`                        | Customer's Solana wallet address, sent when there is no API key; needs a backend with payments off |
 | `url`     | `$UNSTUCK_URL`, then `http://localhost:8080` | Backend URL                          |
 | `cleared` | reCAPTCHA check                           | `(page) => Promise<boolean>`: is the page unblocked? Polled. |
 | `verify`  | `cleared`                                 | `(page) => Promise<boolean>`: run once when the Solver taps Done |

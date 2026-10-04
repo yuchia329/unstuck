@@ -60,6 +60,7 @@ func newHarness(t *testing.T, mutate ...func(*api.Config)) *harness {
 		ClaimWindow:   100 * time.Millisecond,
 		SolveWindow:   100 * time.Millisecond,
 		Price:         testPrice,
+		Payments:      true,
 		ServiceWallet: testServiceWallet,
 		DevMode:       true,
 		ChallengeTTL:  time.Second,

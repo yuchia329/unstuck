@@ -25,6 +25,7 @@ func main() {
 	flag.DurationVar(&cfg.ClaimWindow, "claim-window", 60*time.Second, "how long a Task may wait in the Queue before it Expires (demo: 30s)")
 	flag.DurationVar(&cfg.SolveWindow, "solve-window", 120*time.Second, "how long a Solver has after Claim before the Task Fails (demo: 60s)")
 	flag.Int64Var(&cfg.Price, "price", 10_000, "USDC base units held per Task (10000 = 0.01 USDC)")
+	flag.BoolVar(&cfg.Payments, "payments", false, "charge Customers and pay Solvers; off, Tasks are free, nothing touches Solana, and an Agent may name its Customer by wallet address in place of an API key")
 	flag.StringVar(&cfg.ServiceWallet, "service-wallet", "CW82aTEMcqsqwLaxppzrpEnM41bC83R8JUXpZgYcrhGt", "Unstuck service wallet public key")
 	flag.DurationVar(&cfg.ChallengeTTL, "challenge-ttl", 5*time.Minute, "how long a registration challenge can be signed")
 	flag.BoolVar(&cfg.DevMode, "dev", false, "enable the dev credit endpoint (POST /v1/dev/credit)")
@@ -65,9 +66,9 @@ func main() {
 		_ = httpSrv.Shutdown(shutdown)
 	}()
 
-	log.Printf("unstuck listening on %s (claim %v, solve %v, price %d, dev %v, stun %v, turn %v)",
-		*addr, cfg.ClaimWindow, cfg.SolveWindow, cfg.Price, cfg.DevMode, cfg.STUNURLs, cfg.TURNURLs)
-	if cfg.PayoutKey != nil {
+	log.Printf("unstuck listening on %s (claim %v, solve %v, payments %v, price %d, dev %v, stun %v, turn %v)",
+		*addr, cfg.ClaimWindow, cfg.SolveWindow, cfg.Payments, cfg.Price, cfg.DevMode, cfg.STUNURLs, cfg.TURNURLs)
+	if cfg.Payments && cfg.PayoutKey != nil {
 		log.Printf("withdrawals paid from hot wallet %s in mint %s (minimum %d, account fee %d)",
 			solana.EncodeBase58(cfg.PayoutKey.Public().(ed25519.PublicKey)), cfg.USDCMint, cfg.MinWithdrawal, cfg.AccountFee)
 	}

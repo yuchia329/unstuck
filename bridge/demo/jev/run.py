@@ -11,6 +11,9 @@ is gone; otherwise the Solver keeps the page. Then Jev carries on.
 
     TYPESAFE_API_KEY=... GEMINI_API_KEY=... UNSTUCK_API_KEY=... npm run demo:jev
 
+On a backend with payments off, UNSTUCK_WALLET (a Solana wallet address) can
+stand in for UNSTUCK_API_KEY.
+
 Jev drives a dedicated Chrome over CDP, launched on first use with its own
 profile: Chrome's default profile asks "Allow remote debugging?" for every
 connection, and the hand-off opens a second one mid-run. The Bridge is
@@ -416,9 +419,10 @@ def resume(agent, note):
 
 
 def main():
-    for key in ("TYPESAFE_API_KEY", "UNSTUCK_API_KEY"):
-        if not os.environ.get(key):
-            sys.exit(f"Set {key}.")
+    if not os.environ.get("TYPESAFE_API_KEY"):
+        sys.exit("Set TYPESAFE_API_KEY.")
+    if not (os.environ.get("UNSTUCK_API_KEY") or os.environ.get("UNSTUCK_WALLET")):
+        sys.exit("Set UNSTUCK_API_KEY, or UNSTUCK_WALLET for a backend with payments off.")
     if not TSX.exists():
         sys.exit(f"{TSX} is missing; run npm install in {BRIDGE}.")
     ensure_chrome()

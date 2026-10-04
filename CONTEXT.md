@@ -9,7 +9,7 @@ The Customer's automated browser program. Not part of Unstuck; it only embeds th
 _Avoid_: bot, client
 
 **Customer**:
-The party that owns an Agent and pays for unblocking. Identified by their Solana wallet.
+The party that owns an Agent and pays for unblocking. Identified by their Solana wallet. With payments on, the Customer proves the wallet and uses an API key; with payments off, the Agent names the wallet and nothing proves it.
 _Avoid_: user, client, account
 
 **Solver**:

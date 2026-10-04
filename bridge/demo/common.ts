@@ -29,7 +29,10 @@ export function captchaCleared(blockedUrl: string): ClearedCheck {
   return async (page) => page.url() !== blockedUrl || hasCaptchaToken(page);
 }
 
+// The Balance needs the API key: an Agent that names its Customer by wallet
+// on a backend with payments off has none to show.
 export async function balance(): Promise<string> {
+  if (!process.env.UNSTUCK_API_KEY) return "n/a (no API key)";
   const res = await fetch(`${UNSTUCK_URL}/v1/balance`, {
     headers: { Authorization: `Bearer ${process.env.UNSTUCK_API_KEY}` },
   });

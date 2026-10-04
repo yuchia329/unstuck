@@ -3,7 +3,8 @@
 // Every transition is a conditional update that only succeeds from the
 // expected prior state, so the first outcome recorded is final and later
 // attempts are no-ops. Each transition moves money through the Ledger inside
-// the same database transaction.
+// the same database transaction. A Task created with payments off has no
+// Hold, and its transitions move no money.
 package task
 
 import (
@@ -76,6 +77,7 @@ type Config struct {
 	ClaimWindow time.Duration
 	SolveWindow time.Duration
 	Price       int64 // USDC base units held per Task
+	Payments    bool  // off, a new Task is free: no Hold is placed
 }
 
 // Event reports a committed change to a Task. Events for a Task are
@@ -142,6 +144,7 @@ func New(db *sql.DB, cfg Config, notify func(Event)) *Lifecycle {
 // Create places a Hold of one Price and queues a new Pending Task. obstacle
 // is the Agent's description of what the Solver is to clear, or empty.
 // It returns *ledger.InsufficientError when available Balance is below the Price.
+// With payments off it places no Hold, so the Balance does not matter.
 func (l *Lifecycle) Create(ctx context.Context, customerID, pageURL, obstacle string) (Created, error) {
 	now := time.Now()
 	c := Created{
@@ -157,8 +160,11 @@ func (l *Lifecycle) Create(ctx context.Context, customerID, pageURL, obstacle st
 			c.ID, customerID, pageURL, obstacle, Pending, secret.Hash(c.SessionToken), now.UnixMilli(), c.ClaimDeadline.UnixMilli()); err != nil {
 			return nil, fmt.Errorf("insert task: %w", err)
 		}
-		return &Event{TaskID: c.ID, State: Pending, PageURL: pageURL, Obstacle: obstacle, CreatedAt: now},
-			ledger.Hold(ctx, tx, customerID, c.ID, l.cfg.Price)
+		e := &Event{TaskID: c.ID, State: Pending, PageURL: pageURL, Obstacle: obstacle, CreatedAt: now}
+		if !l.cfg.Payments {
+			return e, nil
+		}
+		return e, ledger.Hold(ctx, tx, customerID, c.ID, l.cfg.Price)
 	})
 	if err != nil {
 		return Created{}, err
@@ -250,7 +256,7 @@ func (l *Lifecycle) Solve(ctx context.Context, id string) (bool, error) {
 	return l.transition(ctx, id, Claimed, Solved, "", "", func(tx *sql.Tx, e *Event) error {
 		var err error
 		e.Earning, e.Fee, err = ledger.Capture(ctx, tx, id, e.SolverWallet)
-		return err
+		return unheld(err)
 	})
 }
 
@@ -268,7 +274,16 @@ func (l *Lifecycle) BridgeLost(ctx context.Context, id string) (bool, error) {
 
 // release returns an ended Task's Hold to the Customer in full.
 func release(ctx context.Context) func(*sql.Tx, *Event) error {
-	return func(tx *sql.Tx, e *Event) error { return ledger.Release(ctx, tx, e.TaskID) }
+	return func(tx *sql.Tx, e *Event) error { return unheld(ledger.Release(ctx, tx, e.TaskID)) }
+}
+
+// unheld drops the error for a Task that has no Hold. A Task created with
+// payments off has none, so ending it moves no money.
+func unheld(err error) error {
+	if errors.Is(err, ledger.ErrNoHold) {
+		return nil
+	}
+	return err
 }
 
 // Resume re-arms timers after a restart, ending overdue Tasks at once, and

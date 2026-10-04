@@ -207,6 +207,46 @@ test("solve creates the Task with the Agent's description of the obstacle", asyn
   }
 });
 
+test("solve names the Customer by wallet, with no Authorization header, when it has no API key", async () => {
+  const page = await open("/clicks");
+  const unstuck = await fakeUnstuck();
+  const saved = process.env.UNSTUCK_API_KEY;
+  delete process.env.UNSTUCK_API_KEY;
+  try {
+    const solving = solve(page, { cleared: async () => true, wallet: "wallet-address", url: unstuck.url });
+    assert.equal((await unstuck.task).wallet, "wallet-address");
+    assert.equal(await unstuck.authorization, undefined);
+    const bridge = await unstuck.bridge;
+    bridge.send({ type: "claimed", solve_deadline: new Date(Date.now() + 60_000).toISOString() });
+    await bridge.next("solved", 3_000);
+    bridge.send({ type: "solved" });
+    await solving;
+    await assert.rejects(solve(page, { url: unstuck.url }), /no API key or wallet/);
+  } finally {
+    if (saved !== undefined) process.env.UNSTUCK_API_KEY = saved;
+    await unstuck.close();
+    await page.close();
+  }
+});
+
+test("solve sends the API key alone when it has both a key and a wallet", async () => {
+  const page = await open("/clicks");
+  const unstuck = await fakeUnstuck();
+  try {
+    const solving = solve(page, { cleared: async () => true, apiKey: "key", wallet: "wallet-address", url: unstuck.url });
+    assert.equal((await unstuck.task).wallet, undefined);
+    assert.equal(await unstuck.authorization, "Bearer key");
+    const bridge = await unstuck.bridge;
+    bridge.send({ type: "claimed", solve_deadline: new Date(Date.now() + 60_000).toISOString() });
+    await bridge.next("solved", 3_000);
+    bridge.send({ type: "solved" });
+    await solving;
+  } finally {
+    await unstuck.close();
+    await page.close();
+  }
+});
+
 test("a Solver's done is checked by verify: not cleared leaves the page with the Solver", async () => {
   const page = await open("/clicks");
   const unstuck = await fakeUnstuck();

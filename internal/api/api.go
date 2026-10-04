@@ -39,10 +39,14 @@ const (
 
 // Config holds the settings chosen by whoever runs the backend.
 type Config struct {
-	DBPath        string
-	ClaimWindow   time.Duration
-	SolveWindow   time.Duration
-	Price         int64 // USDC base units (6 decimals)
+	DBPath      string
+	ClaimWindow time.Duration
+	SolveWindow time.Duration
+	Price       int64 // USDC base units (6 decimals)
+	// Payments charges Customers and pays Solvers. Off, Tasks are free: no
+	// Hold, Deposit polling or Withdrawals, and an Agent may name its
+	// Customer by wallet address in place of an API key.
+	Payments      bool
 	ServiceWallet string
 	DevMode       bool          // enables the dev credit endpoint
 	ChallengeTTL  time.Duration // how long a registration challenge can be signed
@@ -119,6 +123,10 @@ func New(cfg Config) (*Server, error) {
 	if cfg.PayoutPollInterval <= 0 {
 		cfg.PayoutPollInterval = 2 * time.Second
 	}
+	if !cfg.Payments {
+		// Nothing is charged or paid out, so nothing touches Solana.
+		cfg.RPCURL, cfg.PayoutKey = "", nil
+	}
 	db, err := store.Open(cfg.DBPath, customer.Schema, ledger.Schema, task.Schema, deposit.Schema, payout.Schema)
 	if err != nil {
 		return nil, err
@@ -138,6 +146,7 @@ func New(cfg Config) (*Server, error) {
 			ClaimWindow: cfg.ClaimWindow,
 			SolveWindow: cfg.SolveWindow,
 			Price:       cfg.Price,
+			Payments:    cfg.Payments,
 		}, func(e task.Event) {
 			hub.Publish(e)
 			relay.Publish(e)
@@ -164,7 +173,7 @@ func New(cfg Config) (*Server, error) {
 	s.mux.HandleFunc("POST /v1/customers/challenge", s.handleChallenge)
 	s.mux.HandleFunc("POST /v1/customers", s.handleRegister)
 	s.mux.HandleFunc("GET /v1/balance", s.auth(s.handleBalance))
-	s.mux.HandleFunc("POST /v1/tasks", s.auth(s.handleCreateTask))
+	s.mux.HandleFunc("POST /v1/tasks", s.handleCreateTask)
 	if cfg.DevMode {
 		s.mux.HandleFunc("POST /v1/dev/credit", s.auth(s.handleDevCredit))
 	}
@@ -302,22 +311,30 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 // auth resolves the Bearer API key to a Customer id, or responds 401.
 func (s *Server) auth(next func(w http.ResponseWriter, r *http.Request, customerID string)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		key, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if !ok || key == "" {
-			writeError(w, http.StatusUnauthorized, "unauthorized")
-			return
+		if customerID, ok := s.authenticate(w, r); ok {
+			next(w, r, customerID)
 		}
-		customerID, err := s.customers.Authenticate(r.Context(), key)
-		if errors.Is(err, customer.ErrUnknownAPIKey) {
-			writeError(w, http.StatusUnauthorized, "unauthorized")
-			return
-		}
-		if err != nil {
-			s.internalError(w, err)
-			return
-		}
-		next(w, r, customerID)
 	}
+}
+
+// authenticate resolves the Bearer API key to a Customer id. If it cannot,
+// it writes the response and reports false.
+func (s *Server) authenticate(w http.ResponseWriter, r *http.Request) (string, bool) {
+	key, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if !ok || key == "" {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return "", false
+	}
+	customerID, err := s.customers.Authenticate(r.Context(), key)
+	if errors.Is(err, customer.ErrUnknownAPIKey) {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return "", false
+	}
+	if err != nil {
+		s.internalError(w, err)
+		return "", false
+	}
+	return customerID, true
 }
 
 func (s *Server) handleBalance(w http.ResponseWriter, r *http.Request, customerID string) {
@@ -377,13 +394,40 @@ func (s *Server) handleDevCredit(w http.ResponseWriter, r *http.Request, custome
 	s.handleBalance(w, r, customerID)
 }
 
-func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request, customerID string) {
+// handleCreateTask creates a Task for the Customer whose API key the request
+// carries. With payments off a request with no API key may name the Customer
+// by wallet address instead: nothing is spent, so nothing proves the wallet.
+func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
+	var customerID string
+	if s.cfg.Payments || r.Header.Get("Authorization") != "" {
+		var ok bool
+		if customerID, ok = s.authenticate(w, r); !ok {
+			return
+		}
+	}
 	var req struct {
 		PageURL  string `json:"page_url"`
 		Obstacle string `json:"obstacle"`
+		Wallet   string `json:"wallet"` // read only when there is no API key
 	}
 	if !decodeJSON(w, r, &req) {
 		return
+	}
+	if customerID == "" {
+		if req.Wallet == "" {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		var err error
+		customerID, err = s.customers.ForWallet(r.Context(), req.Wallet)
+		if errors.Is(err, customer.ErrInvalidWallet) {
+			writeError(w, http.StatusBadRequest, "invalid_wallet")
+			return
+		}
+		if err != nil {
+			s.internalError(w, err)
+			return
+		}
 	}
 	if !isPageURL(req.PageURL) {
 		writeError(w, http.StatusBadRequest, "invalid_page_url")

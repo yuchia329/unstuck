@@ -20,6 +20,11 @@ export type ClearedCheck = (page: Page) => Promise<boolean>;
 export interface SolveOptions {
   /** The Customer's API key. Defaults to $UNSTUCK_API_KEY. */
   apiKey?: string;
+  /**
+   * The Customer's Solana wallet address, used when there is no API key. Only
+   * a backend with payments off accepts it. Defaults to $UNSTUCK_WALLET.
+   */
+  wallet?: string;
   /** The Unstuck backend. Defaults to $UNSTUCK_URL, then http://localhost:8080. */
   url?: string;
   /** Reports when the Challenge is cleared. Defaults to a reCAPTCHA check. */
@@ -116,12 +121,15 @@ type Notice =
 export async function solve(page: Page, options: SolveOptions = {}): Promise<void> {
   const base = (options.url ?? process.env.UNSTUCK_URL ?? "http://localhost:8080").replace(/\/$/, "");
   const apiKey = options.apiKey ?? process.env.UNSTUCK_API_KEY;
-  if (!apiKey) throw new UnstuckError("Unstuck: no API key; pass apiKey or set UNSTUCK_API_KEY.");
+  const wallet = options.wallet ?? process.env.UNSTUCK_WALLET;
+  if (!apiKey && !wallet) {
+    throw new UnstuckError("Unstuck: no API key or wallet; set UNSTUCK_API_KEY, or UNSTUCK_WALLET for a backend with payments off.");
+  }
   const cleared = options.cleared ?? recaptchaCleared;
   const verify = options.verify ?? cleared;
   const p2p = options.p2p ?? true;
 
-  const task = await createTask(base, apiKey, page.url(), options.obstacle);
+  const task = await createTask(base, apiKey ? { apiKey } : { wallet }, page.url(), options.obstacle);
   const cdp = await page.context().newCDPSession(page);
   // No await between opening the socket and setting its handlers below, so
   // no event is missed.
@@ -274,15 +282,23 @@ export async function solve(page: Page, options: SolveOptions = {}): Promise<voi
   }
 }
 
-async function createTask(base: string, apiKey: string, pageURL: string, obstacle?: string) {
+// The Customer is named by API key or, on a backend with payments off, by
+// wallet address alone.
+async function createTask(base: string, customer: { apiKey?: string; wallet?: string }, pageURL: string, obstacle?: string) {
   const res = await fetch(`${base}/v1/tasks`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ page_url: pageURL, obstacle }),
+    headers: {
+      ...(customer.apiKey ? { Authorization: `Bearer ${customer.apiKey}` } : {}),
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ page_url: pageURL, obstacle, wallet: customer.wallet }),
   });
   const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
   if (res.status === 402) {
     throw new InsufficientBalanceError(Number(body.available), Number(body.price), String(body.service_wallet));
+  }
+  if (res.status === 401 && !customer.apiKey) {
+    throw new UnstuckError("Unstuck: this backend charges for Tasks and needs an API key; set UNSTUCK_API_KEY.");
   }
   if (res.status !== 201) {
     throw new UnstuckError(`Unstuck: creating the Task failed: HTTP ${res.status} ${String(body.error ?? "")}`);
