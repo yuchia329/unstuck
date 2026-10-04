@@ -18,7 +18,8 @@ TypeScript, so demo/jev-handoff.ts connects to that Chrome, finds Jev's tab
 and calls solve() on it.
 
 Set AGENT_URL and AGENT_TASK for another site (the task should say when to
-stop), UNSTUCK_URL for another backend, TEXT_MODEL_* to use Jev's own text
+stop), or AGENT_ASK_TASK=1 to type the task in the terminal once the page is
+open, UNSTUCK_URL for another backend, TEXT_MODEL_* to use Jev's own text
 model settings instead of Gemini, JEV_TRACE to a file path to save Jev's
 decisions and history there.
 """
@@ -48,15 +49,16 @@ if "TEXT_MODEL_API_KEY" not in os.environ and os.environ.get("GEMINI_API_KEY"):
     os.environ.setdefault("TEXT_MODEL", "gemini-3.1-flash-lite-preview")
     os.environ.setdefault("TEXT_MODEL_REASONING", "none")
 
-from browser_harness.helpers import cdp  # noqa: E402
 from jev_ultrafast import Agent  # noqa: E402
 from jev_ultrafast import agent as jev_agent  # noqa: E402
+from jev_ultrafast import browser as jev_browser  # noqa: E402
 from jev_ultrafast import model as jev_model  # noqa: E402
 from jev_ultrafast.browser import StalePage  # noqa: E402
 
-from frames import FrameBrowser  # noqa: E402
+from frames import FrameBrowser, cdp  # noqa: E402
 
 jev_agent.Browser = FrameBrowser
+jev_browser.cdp = cdp  # Jev's own calls wait for a busy page as the demo's do
 
 START_URL = os.environ.get("AGENT_URL", "https://bsd.sos.in.gov/publicbusinesssearch")
 TASK = os.environ.get(
@@ -64,6 +66,8 @@ TASK = os.environ.get(
     "Search for the business Eli Lilly and Company in Indiana's business registry. "
     "Stop when its search results are visible.",
 )
+# Ask for the task in the terminal, once the start page is open, instead of taking TASK.
+ASK_TASK = bool(os.environ.get("AGENT_ASK_TASK"))
 # Jev may hire a human this many times in a run.
 MAX_HIRES = 2
 # Jev is offered HIRE_HUMAN once it has made this many attempts since its last
@@ -171,9 +175,12 @@ def ensure_chrome():
     if url.hostname not in {"127.0.0.1", "localhost"}:
         sys.exit(f"Chrome is not reachable at {CDP_URL}.")
     PROFILE.mkdir(parents=True, exist_ok=True)
+    # Chrome slows the pages of a window it takes to be out of sight, such as one behind the terminal: calls
+    # then take seconds, and a click waits on its frame for longer than Browser Harness waits for Chrome.
     subprocess.Popen(
         [CHROME, f"--remote-debugging-port={url.port}", f"--user-data-dir={PROFILE}", "--no-first-run",
-         "--no-default-browser-check"],
+         "--no-default-browser-check", "--disable-backgrounding-occluded-windows", "--disable-renderer-backgrounding",
+         "--disable-background-timer-throttling"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         start_new_session=True,
@@ -209,6 +216,18 @@ def settle(agent):
         last = page["fingerprint"]
         time.sleep(0.3)
     agent.state["page"] = page
+
+
+def ask_task(agent):
+    """Asks for the task in the terminal and gives it to Jev, which was started with TASK."""
+    task = ""
+    while not task:
+        try:
+            task = input("\nUser: ").strip()
+        except EOFError:
+            sys.exit("\nNo task given.")
+    agent.state["goal"] = task
+    agent.state["plan"] = [task]
 
 
 def captcha_waiting(browser):
@@ -403,11 +422,14 @@ def main():
     if not TSX.exists():
         sys.exit(f"{TSX} is missing; run npm install in {BRIDGE}.")
     ensure_chrome()
-    say("User", TASK)
+    if not ASK_TASK:
+        say("User", TASK)
     with Agent(START_URL, TASK) as agent:
         # Jev opens its tab in the background; show it.
         cdp("Target.activateTarget", targetId=agent.browser.target)
         size_page(agent)
+        if ASK_TASK:
+            ask_task(agent)
         unstuck = Unstuck(agent)
         stale = unblocks = 0
         while agent.state["status"] not in {"done", "blocked"}:
@@ -415,7 +437,7 @@ def main():
             unstuck.offer()
             try:
                 state = agent.command("tick")
-            except (ValueError, RuntimeError) as err:
+            except (ValueError, RuntimeError, TimeoutError) as err:
                 say("Agent", f"Jev stopped: {err}")
                 break
             for h in state["history"][seen:]:
@@ -437,7 +459,7 @@ def main():
         if unstuck.human_s:
             took += f", {unstuck.human_s:.1f}s of it with the human"
         say("Agent", f"Jev finished: {status} after {took}, on {page['url']}")
-        time.sleep(3)  # leave the result on screen
+        agent.browser.target = None  # leave the result on screen: the Agent closes its tab otherwise
     return 0 if status == "done" else 1
 
 

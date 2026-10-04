@@ -8,6 +8,12 @@ element table at their position on the page. Cross-site frames run in their
 own process and are reached through their own CDP target; same-site frames
 share the page's.
 
+Browser Harness gives Chrome 5s to answer a call. A page can stay busy for
+longer, as one with reCAPTCHA does while that loads, so calls here wait
+longer: a click on a busy frame lands late rather than not at all. Reading a
+frame is the exception. It keeps the 5s, and a frame too busy to answer is
+left out of that observation.
+
 Unlike the page's own controls, a frame's are offered even while the frame
 is scrolled out of view, so Jev knows a CAPTCHA is there. One that something
 covers on screen, such as a CAPTCHA's checkbox under its open challenge, is
@@ -23,12 +29,15 @@ frames are left out.
 import json
 import sys
 
-from browser_harness.helpers import cdp
+from browser_harness import helpers
 from jev_ultrafast.browser import READ_STATE, Browser, StalePage, fingerprint
 
 # Frame controls get node ids above the page's: frame k's node n is k * FRAME_NODES + n.
 FRAME_NODES = 1_000_000
 WORLD = "unstuck-jev"
+# Seconds Chrome gets to answer a call, and to answer one that reads a frame.
+PATIENCE = 30
+FRAME_PATIENCE = 5
 
 # The frame element's content box on the page, and whether it is shown.
 OWNER_BOX = """function () {
@@ -55,6 +64,11 @@ FRAME_COVERED = """(points => points.filter(([node, x, y]) => {
   const e = window.__jevFast?.nodes.get(node);
   return !e || !e.contains(document.elementFromPoint(x, y));
 }).map(([node]) => node))(%s)"""
+
+
+def cdp(method, session_id=None, _response_timeout=PATIENCE, **params):
+    """Browser Harness's cdp, with PATIENCE for Chrome's answer."""
+    return helpers.cdp(method, session_id=session_id, _response_timeout=_response_timeout, **params)
 
 
 class FrameBrowser(Browser):
@@ -89,19 +103,23 @@ class FrameBrowser(Browser):
 
     def frame_eval(self, frame_id, session, expression):
         """Evaluates in the frame's isolated world, made again if the frame navigated."""
-        for attempt in range(2):
-            if frame_id not in self.worlds:
-                self.worlds[frame_id] = cdp("Page.createIsolatedWorld", session_id=session, frameId=frame_id,
-                                            worldName=WORLD)["executionContextId"]
-            try:
-                result = cdp("Runtime.evaluate", session_id=session, contextId=self.worlds[frame_id],
-                             expression=expression, returnByValue=True)
-            except RuntimeError:
-                self.worlds.pop(frame_id, None)  # the context went with a navigation
-                continue
-            if result.get("exceptionDetails"):
-                raise StalePage("Frame changed during evaluation")
-            return result.get("result", {}).get("value")
+        try:
+            for attempt in range(2):
+                if frame_id not in self.worlds:
+                    self.worlds[frame_id] = cdp("Page.createIsolatedWorld", session_id=session, frameId=frame_id,
+                                                worldName=WORLD,
+                                                _response_timeout=FRAME_PATIENCE)["executionContextId"]
+                try:
+                    result = cdp("Runtime.evaluate", session_id=session, contextId=self.worlds[frame_id],
+                                 expression=expression, returnByValue=True, _response_timeout=FRAME_PATIENCE)
+                except RuntimeError:
+                    self.worlds.pop(frame_id, None)  # the context went with a navigation
+                    continue
+                if result.get("exceptionDetails"):
+                    raise StalePage("Frame changed during evaluation")
+                return result.get("result", {}).get("value")
+        except TimeoutError:
+            raise StalePage("Frame is busy") from None
         raise StalePage("Frame is navigating")
 
     def owner(self, frame_id, function, *args):
