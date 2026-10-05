@@ -12,8 +12,15 @@ Payments are off by default: Tasks are free, nothing touches Solana, and an
 Agent needs only a wallet address, no API key. See
 [Payments off](#payments-off).
 
+**Unstuck is a demo that you run yourself.** You start the backend, run one
+of the demo Agents, and play the Solver on your phone. The Bridge is not an
+npm package: it is TypeScript source in [bridge/src/](bridge/src/), and an
+Agent imports it by path. See
+[The Bridge and the demo Agents](#the-bridge-and-the-demo-agents).
+
 ```ts
-import { solve } from "@unstuck/bridge";
+// bridge/demo/my-agent.ts
+import { solve } from "../src/index.ts";
 
 await page.goto("https://example.com/login");
 await solve(page); // returns once a human has cleared the Challenge
@@ -28,6 +35,7 @@ Terms like Task, Hold and Session have exact meanings here. See
 - [How it works](#how-it-works)
 - [Payments off](#payments-off)
 - [System architecture](#system-architecture)
+- [The Bridge and the demo Agents](#the-bridge-and-the-demo-agents)
 - [Repository layout](#repository-layout)
 - [Run the demo locally](#run-the-demo-locally)
 - [Run the demo against the public backend](#run-the-demo-against-the-public-backend)
@@ -41,8 +49,8 @@ Terms like Task, Hold and Session have exact meanings here. See
 
 | Who          | What they do                                                    | How they talk to Unstuck                    |
 | ------------ | --------------------------------------------------------------- | ------------------------------------------- |
-| **Customer** | Owns the Agent. Registers a Solana wallet and prepays USDC.     | API key (`unstuck_...`)                     |
-| **Agent**    | The Customer's Playwright program. Embeds the Bridge SDK.       | `solve(page)` from the Bridge SDK           |
+| **Customer** | Owns the Agent. Registers a Solana wallet and prepays USDC.     | API key (`unstuck_...`), or the wallet address alone with payments off |
+| **Agent**    | The Customer's Playwright program. Imports the Bridge.          | `solve(page)` from the Bridge               |
 | **Solver**   | A human who clears Challenges and earns USDC.                   | Queue page in a browser, identified by wallet |
 
 ### One Task, start to finish
@@ -186,9 +194,9 @@ ends without moving money after a restart with payments on.
 
 ```mermaid
 flowchart TB
-    subgraph Customer machine
-        AG[Agent<br/>Playwright script]
-        BR[Bridge SDK<br/>bridge/src]
+    subgraph Agent machine
+        AG[Demo Agent<br/>bridge/demo, run with tsx]
+        BR[Bridge<br/>bridge/src, imported by path]
         CH[Chromium page<br/>with the Challenge]
         AG -- "solve(page)" --> BR
         BR -- "CDP screencast +<br/>page.mouse" --> CH
@@ -200,11 +208,13 @@ flowchart TB
         SE[Session relay<br/>internal/session]
         LE[Ledger: Balance, Holds<br/>internal/ledger]
         DE[Deposit poller<br/>internal/deposit]
+        PO[Withdrawals<br/>internal/payout]
         DB[(SQLite<br/>unstuck.db)]
         WEB[Queue page<br/>internal/web/static]
-        API --- Q & SE & LE
+        API --- Q & SE & LE & PO
         LE --- DB
         DE --> LE
+        PO --> LE
     end
 
     subgraph Solver device
@@ -218,19 +228,25 @@ flowchart TB
     QP <-- "Queue WebSocket:<br/>tasks, claim, relayed frames/input" --> Q
     WEB -- "serves" --> QP
     DE -- "getSignaturesForAddress" --> SOL
+    PO -- "USDC transfer" --> SOL
     BR <-. "WebRTC data channel (direct):<br/>frames + input" .-> QP
 ```
+
+With payments off, the default, the Ledger moves no money, the Deposit
+poller and Withdrawals are off, and nothing reaches Solana.
 
 ### Components
 
 | Component          | Where                            | Job                                                                                   |
 | ------------------ | -------------------------------- | ------------------------------------------------------------------------------------- |
-| **Bridge SDK**     | [bridge/src/](bridge/src/)       | `solve(page)`: creates the Task, streams frames, replays input, runs the cleared check. |
+| **Bridge**         | [bridge/src/](bridge/src/)       | `solve(page)`: creates the Task, streams frames, replays input, runs the cleared check. TypeScript source, not a published package. |
+| **Demo Agents**    | [bridge/demo/](bridge/demo/)     | Playwright scripts that get stuck on a Challenge and call the Bridge.                  |
 | **HTTP API**       | [internal/api/](internal/api/)   | REST endpoints plus the Bridge and Queue WebSockets.                                   |
 | **Queue**          | [internal/queue/](internal/queue/) | Live list of unclaimed Tasks. First Claim wins, one Claim per Solver at a time.       |
 | **Session**        | [internal/session/](internal/session/) | Pairs one Bridge with its Solver. Relays frames and input, and keeps the Session alive across a Solver reconnect. |
 | **Ledger**         | [internal/ledger/](internal/ledger/) | Balances, Holds, capture and release.                                               |
 | **Deposit poller** | [internal/deposit/](internal/deposit/) | Polls Solana for USDC sent to the service wallet and credits Balances.          |
+| **Withdrawals**    | [internal/payout/](internal/payout/) | Pays a Solver's Earnings in USDC from the hot wallet.                             |
 | **Queue page**     | [internal/web/static/](internal/web/static/) | Solver UI: connect a wallet, claim, see the page, send taps and drags.     |
 | **Register CLI**   | [cmd/unstuck-register/](cmd/unstuck-register/) | Signs the registration challenge with a Solana keypair file and prints the API key. |
 
@@ -272,17 +288,72 @@ dependency. Without it, Sessions stay relayed.
 
 Amounts are USDC base units: 1 USDC = 1,000,000.
 
+## The Bridge and the demo Agents
+
+The Bridge is not published to npm and has no build step.
+[bridge/package.json](bridge/package.json) points `main` at
+`src/index.ts`, and everything runs as TypeScript through
+[tsx](https://tsx.is). An Agent uses the Bridge by importing
+[bridge/src/index.ts](bridge/src/index.ts) by path, as every demo Agent
+does.
+
+### Demo Agents
+
+Run these from `bridge/`. Each one needs `UNSTUCK_WALLET`, or
+`UNSTUCK_API_KEY` with payments on.
+
+| Command                  | Agent                                             | What it does                                                                 | Also needs                              |
+| ------------------------ | ------------------------------------------------- | ---------------------------------------------------------------------------- | --------------------------------------- |
+| `npm run demo`           | [agent.ts](bridge/demo/agent.ts)                  | Opens a local fake Challenge: a button to click or a slider to drag.         | nothing                                 |
+| `npm run demo:recaptcha` | [recaptcha.ts](bridge/demo/recaptcha.ts)          | Opens Google's reCAPTCHA demo page and submits the form once it is cleared.  | nothing                                 |
+| `npm run demo:stagehand` | [stagehand.ts](bridge/demo/stagehand.ts)          | A Stagehand LLM agent tries the reCAPTCHA itself. After three failed attempts the demo hands its tab to a Solver. | `ANTHROPIC_API_KEY` |
+| `npm run demo:jev`       | [jev/run.py](bridge/demo/jev/run.py)              | Jev Ultrafast, a Python agent, decides itself when to hire a human. See [below](#a-fast-browser-agent-jev-ultrafast). | uv, `TYPESAFE_API_KEY`, `GEMINI_API_KEY` |
+
+### Your own Agent
+
+Clone the repo, install the Bridge's dependencies (see
+[Prerequisites](#prerequisites)), and put a script next to the demos:
+
+```ts
+// bridge/demo/my-agent.ts
+import { chromium } from "playwright";
+
+import { solve } from "../src/index.ts";
+
+const browser = await chromium.launch({ headless: false });
+const page = await browser.newPage({ viewport: { width: 480, height: 720 } });
+await page.goto("https://example.com/login");
+await solve(page, { obstacle: "Pass the reCAPTCHA check above the Log in button." });
+await page.click("#submit");
+await browser.close();
+```
+
+```sh
+cd bridge
+UNSTUCK_WALLET=<any Solana wallet address> npx tsx demo/my-agent.ts
+```
+
+- **Chromium only.** The Bridge streams the page with a CDP screencast, so
+  `page` must be a Playwright page in Chromium or Chrome.
+- **Say when the page is unblocked.** Unless the Challenge is a reCAPTCHA,
+  pass `cleared`. See [Configuration](#configuration).
+- **An Agent that is not TypeScript, or does not use Playwright,** needs a
+  small helper. [jev-handoff.ts](bridge/demo/jev-handoff.ts) is one: it
+  connects to the Agent's Chrome over CDP, finds the Agent's tab by its
+  target ID and calls `solve()` on it.
+
 ## Repository layout
 
 ```
 cmd/unstuck/            Go backend entry point
 cmd/unstuck-register/   CLI that registers a Customer with a keypair file
-internal/                Backend packages (api, queue, session, ledger, deposit, ...)
+internal/                Backend packages (api, queue, session, ledger, deposit, payout, ...)
 internal/web/static/     Queue page (plain HTML + JS)
-bridge/src/              Bridge SDK (TypeScript)
+bridge/src/              Bridge (TypeScript source, imported by path)
 bridge/demo/             Demo Agents: fake Challenge, real reCAPTCHA, Stagehand, Jev
 bridge/test/             Bridge tests
 deploy/                  systemd unit, k3s Ingress, deploy script
+jev_start_example.sh     Launcher for the Jev demo against the public backend
 CONTEXT.md               Glossary
 ```
 
@@ -294,10 +365,10 @@ Run every command from the repo root unless the step says otherwise.
 ### Prerequisites
 
 - Go 1.26+ and Node 22+
-- [pay.sh CLI](https://pay.sh) with a funded **local** account. A
-  remote-custody account will not work, because the keypair must be
-  exportable.
 - ngrok with an authtoken (`ngrok config add-authtoken <token>`)
+- Only with payments on: [pay.sh CLI](https://pay.sh) with a funded
+  **local** account. A remote-custody account will not work, because the
+  keypair must be exportable.
 - Bridge dependencies:
 
   ```sh
@@ -408,7 +479,7 @@ npm run demo              # local fake Challenge: button click or slider drag
 npm run demo:recaptcha    # Google's reCAPTCHA demo page
 ```
 
-A Chromium window opens and the Agent creates a Task. On the phone:
+[Demo Agents](#demo-agents) lists the others. A Chromium window opens and the Agent creates a Task. On the phone:
 
 1. The Task appears in the Queue. Tap **Claim** within 30s.
 2. The Agent's page appears, with its URL and a countdown.
@@ -443,6 +514,19 @@ Otherwise the Solver keeps the page until the solve window ends. Either way
 Jev then carries on. When Jev is blocked, it looks again with `HIRE_HUMAN`
 on offer, at most twice a run. `JEV_TRACE=file.json` saves Jev's decisions.
 
+Jev is Python and the Bridge is TypeScript, so a helper process does the
+hand-off:
+
+```mermaid
+flowchart LR
+    JEV["Jev Ultrafast (Python)<br/>demo/jev/run.py"] -- CDP --> CHR[Chrome on port 9335<br/>own profile]
+    JEV -- "HIRE_HUMAN: starts" --> HO["jev-handoff.ts<br/>(tsx + Playwright)"]
+    HO -- "connectOverCDP,<br/>finds Jev's tab" --> CHR
+    HO -- "solve(page)" --> BR[Bridge]
+    BR --> BE[Unstuck backend]
+    HO -. "Done: is the obstacle gone?<br/>yes / no over stdin and stdout" .-> JEV
+```
+
 Needs [uv](https://docs.astral.sh/uv/), a TypeSafe key
 (console.typesafe.ai/keys) and a Gemini API key for typing into fields:
 
@@ -458,7 +542,8 @@ backend: copy it and fill in the keys and the wallet address.
 The first run launches a separate Chrome with its own profile in
 `~/.unstuck/jev-chrome` and a debugging port on 9335. Leave it open between
 runs. Your everyday Chrome would ask "Allow remote debugging?" each time the
-Bridge connects. Set `AGENT_URL` and `AGENT_TASK` for another site.
+Bridge connects. Set `AGENT_URL` and `AGENT_TASK` for another site, or
+`AGENT_ASK_TASK=1` to type the task in the terminal once the page is open.
 
 The page fills the Chrome window, and resizing the window lays it out again.
 `JEV_VIEWPORT` sets its starting size (default `800x900`). The Solver sees the
@@ -491,6 +576,9 @@ kept. Follow logs with `ssh hubstream journalctl -u unstuck -f`.
 
 ### 2. Register the Customer (once per database)
 
+Needed only when the unit runs with `-payments`. It does not today, so skip
+to [step 4](#4-run-the-agent-and-solve).
+
 ```sh
 pay account export local
 go run ./cmd/unstuck-register -server https://unstuck.yuchia.dev -keypair ./pay-account-local-*.json
@@ -503,7 +591,7 @@ Deposit from that wallet, even ones already spent against a local database.
 
 ### 3. Fund and check the Balance
 
-Make a real Deposit as in [local step 3](#3-fund-the-balance), then:
+Needed only with `-payments`. Make a real Deposit as in [local step 3](#3-fund-the-balance), then:
 
 ```sh
 curl -H "Authorization: Bearer $UNSTUCK_API_KEY" https://unstuck.yuchia.dev/v1/balance
@@ -513,6 +601,7 @@ curl -H "Authorization: Bearer $UNSTUCK_API_KEY" https://unstuck.yuchia.dev/v1/b
 
 ```sh
 cd bridge
+export UNSTUCK_WALLET=<any Solana wallet address>
 UNSTUCK_URL=https://unstuck.yuchia.dev npm run demo:recaptcha
 ```
 
