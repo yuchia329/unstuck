@@ -3,7 +3,7 @@
 // attempts the demo pauses it and hands the same browser tab to a human
 // Solver through the Bridge, then tells the agent to carry on.
 //
-//   ANTHROPIC_API_KEY=... UNSTUCK_API_KEY=... \
+//   ANTHROPIC_API_KEY=... \
 //   AGENT_URL=https://example.com AGENT_TASK="..." npm run demo:stagehand
 //
 // Playwright launches Chromium with a CDP port and Stagehand attaches to it,
@@ -15,7 +15,7 @@ import type { LanguageModelMiddleware } from "ai";
 import { chromium, type Page } from "playwright";
 
 import { UnstuckError, solve } from "../src/index.ts";
-import { balance, captchaCleared, hasCaptchaToken, say } from "./common.ts";
+import { captchaCleared, hasCaptchaToken, say } from "./common.ts";
 
 const START_URL = process.env.AGENT_URL ?? "https://www.google.com/recaptcha/api2/demo";
 const TASK =
@@ -170,7 +170,6 @@ const stagehand = new Stagehand({
 try {
   await stagehand.init();
   await page.goto(START_URL);
-  say("Unstuck", `Balance ${await balance()}.`);
   say("User", TASK);
 
   let steps = 0;
@@ -181,7 +180,7 @@ try {
   // Hands the tab to a human and waits until the check is passed. Returns the
   // message for the agent.
   async function handToHuman(): Promise<string> {
-    say("Agent", `Still blocked after ${attempts} attempts. Hiring a human through Unstuck for 0.01 USDC.`);
+    say("Agent", `Still blocked after ${attempts} attempts. Hiring a human through Unstuck.`);
     const started = Date.now();
     const waiting = setInterval(async () => {
       const token = await hasCaptchaToken(page).catch((err: Error) => `error: ${err.message}`);
@@ -198,7 +197,7 @@ try {
     } finally {
       clearInterval(waiting);
     }
-    say("Unstuck", `A human cleared the check. Balance ${await balance()}. The agent takes over again.`);
+    say("Unstuck", "A human cleared the check. The agent takes over again.");
     return HUMAN_PASSED;
   }
 

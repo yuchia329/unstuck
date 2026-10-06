@@ -62,7 +62,7 @@ type Notice struct {
 // Viewer is one Solver connection's feed of the Session it holds the Claim
 // on. Only the latest View is kept: a Solver who falls behind skips frames.
 type Viewer struct {
-	Wallet  string
+	Solver  string // the Solver's id
 	C       <-chan View
 	c       chan View
 	Answers <-chan Answer
@@ -80,7 +80,7 @@ type Relay struct {
 
 type session struct {
 	bridge *Bridge
-	solver string // the claimant's wallet, once claimed
+	solver string // the claimant's id, once claimed
 	// peerToken is the credential, made at Claim, that the claimant's WebRTC
 	// peer presents to the Bridge.
 	peerToken string
@@ -153,30 +153,30 @@ func (r *Relay) LeaveBridge(b *Bridge) {
 // Input forwards a Solver's input event to the Bridge, but only from the
 // Solver holding the Task's Claim. Events reach the Bridge in the order they
 // were forwarded.
-func (r *Relay) Input(taskID, wallet string, in Input) error {
-	return r.fromSolver(taskID, wallet, ToBridge{Input: &in})
+func (r *Relay) Input(taskID, solver string, in Input) error {
+	return r.fromSolver(taskID, solver, ToBridge{Input: &in})
 }
 
 // Offer forwards a Solver's WebRTC offer to the Bridge, but only from the
 // Solver holding the Task's Claim.
-func (r *Relay) Offer(taskID, wallet, sdp string) error {
-	return r.fromSolver(taskID, wallet, ToBridge{Offer: sdp})
+func (r *Relay) Offer(taskID, solver, sdp string) error {
+	return r.fromSolver(taskID, solver, ToBridge{Offer: sdp})
 }
 
 // Done tells the Bridge that the Solver holding the Task's Claim reports the
 // obstacle cleared, so the Agent can check.
-func (r *Relay) Done(taskID, wallet string) error {
-	return r.fromSolver(taskID, wallet, ToBridge{Done: true})
+func (r *Relay) Done(taskID, solver string) error {
+	return r.fromSolver(taskID, solver, ToBridge{Done: true})
 }
 
-func (r *Relay) fromSolver(taskID, wallet string, m ToBridge) error {
+func (r *Relay) fromSolver(taskID, solver string, m ToBridge) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	s, ok := r.sessions[taskID]
 	if !ok {
 		return ErrNoBridge
 	}
-	if s.ended || s.solver == "" || s.solver != wallet {
+	if s.ended || s.solver == "" || s.solver != solver {
 		return task.ErrNotYourClaim
 	}
 	s.bridge.send(m)
@@ -194,7 +194,7 @@ func (r *Relay) Answer(b *Bridge, sdp string) {
 	}
 	a := Answer{TaskID: b.TaskID, SDP: sdp, PeerToken: s.peerToken}
 	for v := range r.viewers {
-		if v.Wallet != s.solver {
+		if v.Solver != s.solver {
 			continue
 		}
 		select {
@@ -215,7 +215,7 @@ func (r *Relay) NotCleared(b *Bridge) {
 	}
 	n := Notice{TaskID: b.TaskID, Type: "not_cleared"}
 	for v := range r.viewers {
-		if v.Wallet != s.solver {
+		if v.Solver != s.solver {
 			continue
 		}
 		select {
@@ -248,14 +248,14 @@ func (r *Relay) update(b *Bridge, change func(*session)) {
 
 // Watch registers a Solver connection. If the Solver holds a live Claim, its
 // page is shown at once, so a reconnecting Solver picks up where they were.
-func (r *Relay) Watch(wallet string) *Viewer {
+func (r *Relay) Watch(solver string) *Viewer {
 	c, answers, notices := make(chan View, 1), make(chan Answer, answerBuffer), make(chan Notice, noticeBuffer)
-	v := &Viewer{Wallet: wallet, C: c, c: c, Answers: answers, answers: answers, Notices: notices, notices: notices}
+	v := &Viewer{Solver: solver, C: c, c: c, Answers: answers, answers: answers, Notices: notices, notices: notices}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.viewers[v] = struct{}{}
 	for id, s := range r.sessions {
-		if s.solver == wallet {
+		if s.solver == solver {
 			r.show(id, s)
 		}
 	}
@@ -281,7 +281,7 @@ func (r *Relay) Publish(e task.Event) {
 	}
 	switch e.State {
 	case task.Claimed:
-		s.solver = e.SolverWallet
+		s.solver = e.Solver
 		if s.peerToken == "" {
 			s.peerToken = secret.New("pt_")
 		}
@@ -323,7 +323,7 @@ func (r *Relay) show(taskID string, s *session) {
 	}
 	view := View{TaskID: taskID, URL: s.url, Frame: *s.frame}
 	for v := range r.viewers {
-		if v.Wallet != s.solver {
+		if v.Solver != s.solver {
 			continue
 		}
 		select {

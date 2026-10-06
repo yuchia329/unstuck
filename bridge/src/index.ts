@@ -18,13 +18,6 @@ import { type FrameMetadata, toViewport, wheelToViewport } from "./viewport.ts";
 export type ClearedCheck = (page: Page) => Promise<boolean>;
 
 export interface SolveOptions {
-  /** The Customer's API key. Defaults to $UNSTUCK_API_KEY. */
-  apiKey?: string;
-  /**
-   * The Customer's Solana wallet address, used when there is no API key. Only
-   * a backend with payments off accepts it. Defaults to $UNSTUCK_WALLET.
-   */
-  wallet?: string;
   /** The Unstuck backend. Defaults to $UNSTUCK_URL, then http://localhost:8080. */
   url?: string;
   /** Reports when the Challenge is cleared. Defaults to a reCAPTCHA check. */
@@ -51,21 +44,6 @@ export interface SolveOptions {
 
 export class UnstuckError extends Error {
   override name = "UnstuckError";
-}
-
-/** Task creation was refused: available Balance is below the Price. */
-export class InsufficientBalanceError extends UnstuckError {
-  override name = "InsufficientBalanceError";
-  constructor(
-    readonly available: number,
-    readonly price: number,
-    readonly serviceWallet: string,
-  ) {
-    super(
-      `Unstuck: insufficient balance: ${usdc(available)} USDC available, the Price of a Task is ${usdc(price)} USDC. ` +
-        `Deposit USDC on Solana mainnet from your registered wallet to ${serviceWallet}.`,
-    );
-  }
 }
 
 /** No Solver claimed the Task within the claim window. */
@@ -110,26 +88,21 @@ type Notice =
 
 /**
  * Hands page to a human Solver and resolves once the cleared check passes and
- * the Task is Solved. Throws InsufficientBalanceError, TaskExpiredError or
- * TaskFailedError otherwise.
+ * the Task is Solved. Throws TaskExpiredError or TaskFailedError otherwise.
  *
- * The Solver sees exactly the page's viewport. A Solver with a mouse can
- * scroll it but one on a phone cannot, so the whole Challenge should fit in it. Solvers are often on phones, where a small,
- * portrait viewport (e.g. 480x720 for reCAPTCHA's 400x580 image grid) keeps
- * click targets large.
+ * The Solver sees exactly the page's viewport and can scroll it: with a mouse
+ * wheel, or by swiping on a phone. A Challenge that fits in the viewport is
+ * still quicker to clear. Solvers are often on
+ * phones, where a small, portrait viewport (e.g. 480x720 for reCAPTCHA's
+ * 400x580 image grid) keeps click targets large.
  */
 export async function solve(page: Page, options: SolveOptions = {}): Promise<void> {
   const base = (options.url ?? process.env.UNSTUCK_URL ?? "http://localhost:8080").replace(/\/$/, "");
-  const apiKey = options.apiKey ?? process.env.UNSTUCK_API_KEY;
-  const wallet = options.wallet ?? process.env.UNSTUCK_WALLET;
-  if (!apiKey && !wallet) {
-    throw new UnstuckError("Unstuck: no API key or wallet; set UNSTUCK_API_KEY, or UNSTUCK_WALLET for a backend with payments off.");
-  }
   const cleared = options.cleared ?? recaptchaCleared;
   const verify = options.verify ?? cleared;
   const p2p = options.p2p ?? true;
 
-  const task = await createTask(base, apiKey ? { apiKey } : { wallet }, page.url(), options.obstacle);
+  const task = await createTask(base, page.url(), options.obstacle);
   const cdp = await page.context().newCDPSession(page);
   // No await between opening the socket and setting its handlers below, so
   // no event is missed.
@@ -282,24 +255,14 @@ export async function solve(page: Page, options: SolveOptions = {}): Promise<voi
   }
 }
 
-// The Customer is named by API key or, on a backend with payments off, by
-// wallet address alone.
-async function createTask(base: string, customer: { apiKey?: string; wallet?: string }, pageURL: string, obstacle?: string) {
+// Creating a Task needs no key and no account.
+async function createTask(base: string, pageURL: string, obstacle?: string) {
   const res = await fetch(`${base}/v1/tasks`, {
     method: "POST",
-    headers: {
-      ...(customer.apiKey ? { Authorization: `Bearer ${customer.apiKey}` } : {}),
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ page_url: pageURL, obstacle, wallet: customer.wallet }),
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ page_url: pageURL, obstacle }),
   });
   const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-  if (res.status === 402) {
-    throw new InsufficientBalanceError(Number(body.available), Number(body.price), String(body.service_wallet));
-  }
-  if (res.status === 401 && !customer.apiKey) {
-    throw new UnstuckError("Unstuck: this backend charges for Tasks and needs an API key; set UNSTUCK_API_KEY.");
-  }
   if (res.status !== 201) {
     throw new UnstuckError(`Unstuck: creating the Task failed: HTTP ${res.status} ${String(body.error ?? "")}`);
   }
@@ -407,8 +370,4 @@ function pollCleared(page: Page, cleared: ClearedCheck, onCleared: () => void) {
       checking = false;
     }
   }, CLEARED_POLL_MS);
-}
-
-function usdc(units: number) {
-  return (units / 1e6).toString();
 }

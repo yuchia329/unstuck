@@ -9,10 +9,7 @@ through the Bridge. The Task is Solved when the CAPTCHA issues a token, or
 when the Solver taps Done and Jev, looking at the page, agrees the obstacle
 is gone; otherwise the Solver keeps the page. Then Jev carries on.
 
-    TYPESAFE_API_KEY=... GEMINI_API_KEY=... UNSTUCK_API_KEY=... npm run demo:jev
-
-On a backend with payments off, UNSTUCK_WALLET (a Solana wallet address) can
-stand in for UNSTUCK_API_KEY.
+    TYPESAFE_API_KEY=... GEMINI_API_KEY=... npm run demo:jev
 
 Jev drives a dedicated Chrome over CDP, launched on first use with its own
 profile: Chrome's default profile asks "Allow remote debugging?" for every
@@ -86,7 +83,7 @@ MAX_STALE = 6
 MAX_UNBLOCKS = 2
 UNBLOCK_NOTE = ("Your last actions changed nothing. Try something else that advances the goal, or choose HIRE_HUMAN "
                 "if an obstacle you cannot pass yourself is in the way.")
-HIRE_LABEL = "Hire a human through Unstuck (0.01 USDC) to get past one obstacle you failed to pass yourself"
+HIRE_LABEL = "Hire a human through Unstuck to get past one obstacle you failed to pass yourself"
 # Added to Jev's rules for choosing its next operation.
 HIRE_RULES = """An error, an alert or an unmet check on the page (e.g. "You must complete the Captcha") means the
 goal is not done: deal with it. Try an obstacle such as a CAPTCHA yourself first: CLICK its checkbox, and if a
@@ -372,7 +369,7 @@ class Unstuck:
         self.hires += 1
         self.agent.browser.hire_label = None
         obstacle = describe_obstacle(self.agent.state["goal"], page, self.agent.state["history"])
-        say("Agent", f"Jev hires a human through Unstuck for 0.01 USDC. The job: {obstacle}")
+        say("Agent", f"Jev hires a human through Unstuck. The job: {obstacle}")
         started = time.monotonic()
         cleared = self.hand_off(obstacle)
         self.human_s += time.monotonic() - started
@@ -421,8 +418,6 @@ def resume(agent, note):
 def main():
     if not os.environ.get("TYPESAFE_API_KEY"):
         sys.exit("Set TYPESAFE_API_KEY.")
-    if not (os.environ.get("UNSTUCK_API_KEY") or os.environ.get("UNSTUCK_WALLET")):
-        sys.exit("Set UNSTUCK_API_KEY, or UNSTUCK_WALLET for a backend with payments off.")
     if not TSX.exists():
         sys.exit(f"{TSX} is missing; run npm install in {BRIDGE}.")
     ensure_chrome()

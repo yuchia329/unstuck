@@ -4,7 +4,7 @@
 // checkbox and clears any image grid by clicking; the Agent then
 // submits the form.
 //
-//   UNSTUCK_API_KEY=... npm run demo:recaptcha
+//   npm run demo:recaptcha
 //
 // Set UNSTUCK_URL if the backend is not on http://localhost:8080.
 

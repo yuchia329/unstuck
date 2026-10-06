@@ -6,7 +6,6 @@ After=network-online.target k3s.service
 Wants=network-online.target
 
 [Service]
-# Never add -dev here: the dev credit endpoint would let any Customer mint Balance.
 ExecStart=/usr/local/bin/unstuck -addr 10.42.0.1:8080 -db /var/lib/unstuck/unstuck.db -claim-window 30s -solve-window 5m
 DynamicUser=yes
 StateDirectory=unstuck

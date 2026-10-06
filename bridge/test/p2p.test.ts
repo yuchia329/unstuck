@@ -106,7 +106,7 @@ async function session(
   const page = await browser.newPage({ viewport: { width: 400, height: 300 } });
   await page.setContent(PAGE);
   const unstuck = await fakeUnstuck();
-  const solving = solve(page, { ...options, cleared, apiKey: "key", url: unstuck.url });
+  const solving = solve(page, { ...options, cleared, url: unstuck.url });
   solving.catch(() => {}); // the test awaits it
   const peers: SolverPeer[] = [];
   try {

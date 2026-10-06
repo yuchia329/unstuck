@@ -26,7 +26,7 @@ type Message struct {
 	Added   *Task
 	Removed string // Task id: claimed or Expired
 	Failed  *Failed
-	Solved  *Solved
+	Solved  string // Task id, for the Solver who held its Claim
 }
 
 // Failed tells the Solver holding a Claim that its Task Failed.
@@ -35,16 +35,9 @@ type Failed struct {
 	Reason task.Reason
 }
 
-// Solved tells the Solver holding a Claim that its Task was Solved and what
-// the captured Hold was split into.
-type Solved struct {
-	TaskID       string
-	Earning, Fee int64
-}
-
 // Sub is one Solver connection's feed of Queue changes.
 type Sub struct {
-	Wallet string
+	Solver string         // the Solver's id
 	C      <-chan Message // closed when the Sub is dropped or unsubscribed
 	c      chan Message
 }
@@ -76,17 +69,17 @@ func (h *Hub) Publish(e task.Event) {
 	}
 	switch e.State {
 	case task.Failed:
-		h.sendTo(e.SolverWallet, Message{Failed: &Failed{TaskID: e.TaskID, Reason: e.Reason}})
+		h.sendTo(e.Solver, Message{Failed: &Failed{TaskID: e.TaskID, Reason: e.Reason}})
 	case task.Solved:
-		h.sendTo(e.SolverWallet, Message{Solved: &Solved{TaskID: e.TaskID, Earning: e.Earning, Fee: e.Fee}})
+		h.sendTo(e.Solver, Message{Solved: e.TaskID})
 	}
 }
 
 // Subscribe registers a Solver and returns the Tasks queued right now; every
 // later change arrives on the Sub.
-func (h *Hub) Subscribe(wallet string) (*Sub, []Task) {
+func (h *Hub) Subscribe(solver string) (*Sub, []Task) {
 	c := make(chan Message, subBuffer)
-	s := &Sub{Wallet: wallet, C: c, c: c}
+	s := &Sub{Solver: solver, C: c, c: c}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.subs[s] = struct{}{}
@@ -111,9 +104,9 @@ func (h *Hub) broadcast(m Message) {
 	}
 }
 
-func (h *Hub) sendTo(wallet string, m Message) {
+func (h *Hub) sendTo(solver string, m Message) {
 	for s := range h.subs {
-		if s.Wallet == wallet {
+		if s.Solver == solver {
 			h.send(s, m)
 		}
 	}

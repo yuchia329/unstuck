@@ -4,7 +4,7 @@
 /unstuck
 /overpass
 
-# Solana keypair files hold private keys; never commit them.
+# Solana keypair files, from when Customers registered a wallet, hold private keys; never commit them.
 pay-account-*.json
 *keypair*.json
 
@@ -14,7 +14,7 @@ node_modules/
 .venv/
 __pycache__/
 
-# Local secrets: the Unstuck API key (.overpass-key from before the rename) and the demo launcher (holds a model API key).
+# Local secrets: API key files from when Unstuck had keys, and the demo launchers (they hold model API keys).
 .unstuck-key
 .overpass-key
 client_start.sh

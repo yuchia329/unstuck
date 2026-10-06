@@ -15,18 +15,15 @@ export type Bridge = {
   count(type: string): number;
 };
 
-// fakeUnstuck accepts one Task and hands the test its Bridge socket, the
-// body the Task was created with and the Authorization header it came with.
+// fakeUnstuck accepts one Task and hands the test its Bridge socket and the
+// body the Task was created with.
 export async function fakeUnstuck() {
   let created!: (body: Record<string, unknown>) => void;
   const task = new Promise<Record<string, unknown>>((resolve) => (created = resolve));
-  let authorized!: (header: string | undefined) => void;
-  const authorization = new Promise<string | undefined>((resolve) => (authorized = resolve));
   const server = createServer(async (req, res) => {
     if (req.method === "POST" && req.url === "/v1/tasks") {
       let body = "";
       for await (const chunk of req) body += chunk;
-      authorized(req.headers.authorization);
       created(JSON.parse(body) as Record<string, unknown>);
       res.writeHead(201, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ task_id: "task-1", session_token: "token-1" }));
@@ -78,7 +75,6 @@ export async function fakeUnstuck() {
   return {
     url: `http://127.0.0.1:${port}`,
     task,
-    authorization,
     bridge,
     close: async () => {
       for (const ws of wss.clients) ws.terminate();

@@ -1,7 +1,7 @@
 // Demo Agent: opens a local fake Challenge page, gets stuck on it and calls
 // the Bridge. A Solver on the Queue page clears it by clicking the button.
 //
-//   UNSTUCK_API_KEY=... npm run demo
+//   npm run demo
 //
 // Set UNSTUCK_URL if the backend is not on http://localhost:8080.
 

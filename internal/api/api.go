@@ -4,7 +4,6 @@ package api
 import (
 	"bytes"
 	"context"
-	"crypto/ed25519"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
@@ -19,96 +18,46 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/yuchia329/unstuck/internal/customer"
-	"github.com/yuchia329/unstuck/internal/deposit"
-	"github.com/yuchia329/unstuck/internal/ledger"
-	"github.com/yuchia329/unstuck/internal/payout"
 	"github.com/yuchia329/unstuck/internal/queue"
 	"github.com/yuchia329/unstuck/internal/session"
-	"github.com/yuchia329/unstuck/internal/solana"
 	"github.com/yuchia329/unstuck/internal/store"
 	"github.com/yuchia329/unstuck/internal/task"
 	"github.com/yuchia329/unstuck/internal/web"
 )
 
-const (
-	recentTasksLimit    = 20
-	recentDepositsLimit = 20
-	maxBodyBytes        = 64 << 10
-)
+const maxBodyBytes = 64 << 10
 
 // Config holds the settings chosen by whoever runs the backend.
 type Config struct {
-	DBPath      string
-	ClaimWindow time.Duration
-	SolveWindow time.Duration
-	Price       int64 // USDC base units (6 decimals)
-	// Payments charges Customers and pays Solvers. Off, Tasks are free: no
-	// Hold, Deposit polling or Withdrawals, and an Agent may name its
-	// Customer by wallet address in place of an API key.
-	Payments      bool
-	ServiceWallet string
-	DevMode       bool          // enables the dev credit endpoint
-	ChallengeTTL  time.Duration // how long a registration challenge can be signed
-	RPCURL        string        // Solana JSON-RPC endpoint polled for Deposits; empty disables polling
-	PollInterval  time.Duration // how often to poll for Deposits
-	PingInterval  time.Duration // how often to ping Bridge and Queue sockets; zero disables
+	DBPath       string
+	ClaimWindow  time.Duration
+	SolveWindow  time.Duration
+	PingInterval time.Duration // how often to ping Bridge and Queue sockets; zero disables
 	// STUNURLs and TURNURLs are handed to a Session's peers for a direct
 	// WebRTC connection. TURN needs TURNSecret, coturn's static-auth-secret.
 	STUNURLs   []string
 	TURNURLs   []string
 	TURNSecret string
-	// PayoutKey is the hot wallet that pays Solvers' Withdrawals; nil
-	// disables Withdrawals. It needs PayoutRPCURL, and USDC and SOL to pay with.
-	PayoutKey          ed25519.PrivateKey
-	PayoutRPCURL       string
-	USDCMint           string        // defaults to mainnet USDC
-	MinWithdrawal      int64         // least a Solver receives per Withdrawal, USDC base units
-	AccountFee         int64         // kept back when the Solver has no USDC token account yet
-	PayoutPollInterval time.Duration // how often sent Withdrawals are checked; defaults to 2s
 }
 
 // Server is the backend: an http.Handler plus the resources behind it.
 type Server struct {
-	cfg       Config
-	db        *sql.DB
-	customers *customer.Registry
-	tasks     *task.Lifecycle
-	queue     *queue.Hub
-	relay     *session.Relay
-	deposits  *deposit.Poller
-	payouts   *payout.Service
-	mux       *http.ServeMux
+	cfg   Config
+	db    *sql.DB
+	tasks *task.Lifecycle
+	queue *queue.Hub
+	relay *session.Relay
+	mux   *http.ServeMux
 }
 
 func (c Config) validate() error {
 	switch {
-	case c.Price <= 0:
-		return fmt.Errorf("price must be positive, got %d", c.Price)
 	case c.ClaimWindow <= 0 || c.SolveWindow <= 0:
 		return fmt.Errorf("claim and solve windows must be positive, got %v and %v", c.ClaimWindow, c.SolveWindow)
-	case !solana.IsPubkey(c.ServiceWallet):
-		return fmt.Errorf("service wallet %q is not a Solana public key", c.ServiceWallet)
-	case c.ChallengeTTL <= 0:
-		return fmt.Errorf("challenge TTL must be positive, got %v", c.ChallengeTTL)
 	case c.PingInterval < 0:
 		return fmt.Errorf("ping interval must not be negative, got %v", c.PingInterval)
 	case len(c.TURNURLs) > 0 && c.TURNSecret == "":
 		return errors.New("TURN servers need a TURN secret")
-	case c.RPCURL != "" && c.PollInterval <= 0:
-		return fmt.Errorf("poll interval must be positive, got %v", c.PollInterval)
-	case c.PayoutKey == nil:
-		return nil
-	case len(c.PayoutKey) != ed25519.PrivateKeySize:
-		return errors.New("payout key is not an ed25519 keypair")
-	case c.PayoutRPCURL == "":
-		return errors.New("payouts need an RPC URL")
-	case c.USDCMint != "" && !solana.IsPubkey(c.USDCMint):
-		return fmt.Errorf("USDC mint %q is not a Solana public key", c.USDCMint)
-	case c.MinWithdrawal <= 0:
-		return fmt.Errorf("minimum withdrawal must be positive, got %d", c.MinWithdrawal)
-	case c.AccountFee < 0:
-		return fmt.Errorf("account fee must not be negative, got %d", c.AccountFee)
 	}
 	return nil
 }
@@ -117,17 +66,7 @@ func New(cfg Config) (*Server, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, fmt.Errorf("config: %w", err)
 	}
-	if cfg.USDCMint == "" {
-		cfg.USDCMint = solana.USDCMint
-	}
-	if cfg.PayoutPollInterval <= 0 {
-		cfg.PayoutPollInterval = 2 * time.Second
-	}
-	if !cfg.Payments {
-		// Nothing is charged or paid out, so nothing touches Solana.
-		cfg.RPCURL, cfg.PayoutKey = "", nil
-	}
-	db, err := store.Open(cfg.DBPath, customer.Schema, ledger.Schema, task.Schema, deposit.Schema, payout.Schema)
+	db, err := store.Open(cfg.DBPath, task.Schema)
 	if err != nil {
 		return nil, err
 	}
@@ -138,27 +77,11 @@ func New(cfg Config) (*Server, error) {
 	hub := queue.New()
 	relay := session.New()
 	s := &Server{
-		cfg:       cfg,
-		db:        db,
-		customers: customer.New(db, cfg.ChallengeTTL),
-		deposits:  deposit.New(db, deposit.Config{RPCURL: cfg.RPCURL, ServiceWallet: cfg.ServiceWallet, PollInterval: cfg.PollInterval}),
-		tasks: task.New(db, task.Config{
-			ClaimWindow: cfg.ClaimWindow,
-			SolveWindow: cfg.SolveWindow,
-			Price:       cfg.Price,
-			Payments:    cfg.Payments,
-		}, func(e task.Event) {
+		cfg: cfg,
+		db:  db,
+		tasks: task.New(db, task.Config{ClaimWindow: cfg.ClaimWindow, SolveWindow: cfg.SolveWindow}, func(e task.Event) {
 			hub.Publish(e)
 			relay.Publish(e)
-		}),
-		payouts: payout.New(db, payout.Config{
-			RPCURL:       cfg.PayoutRPCURL,
-			Key:          cfg.PayoutKey,
-			Mint:         cfg.USDCMint,
-			Minimum:      cfg.MinWithdrawal,
-			AccountFee:   cfg.AccountFee,
-			ChallengeTTL: cfg.ChallengeTTL,
-			PollInterval: cfg.PayoutPollInterval,
 		}),
 		queue: hub,
 		relay: relay,
@@ -168,20 +91,9 @@ func New(cfg Config) (*Server, error) {
 		db.Close()
 		return nil, err
 	}
-	s.deposits.Start()
-	s.payouts.Start()
-	s.mux.HandleFunc("POST /v1/customers/challenge", s.handleChallenge)
-	s.mux.HandleFunc("POST /v1/customers", s.handleRegister)
-	s.mux.HandleFunc("GET /v1/balance", s.auth(s.handleBalance))
 	s.mux.HandleFunc("POST /v1/tasks", s.handleCreateTask)
-	if cfg.DevMode {
-		s.mux.HandleFunc("POST /v1/dev/credit", s.auth(s.handleDevCredit))
-	}
 	s.mux.HandleFunc("GET /v1/queue", s.handleQueue)
 	s.mux.HandleFunc("GET /v1/tasks/{id}/bridge", s.handleBridge)
-	s.mux.HandleFunc("GET /v1/solvers/{wallet}/earnings", s.handleEarnings)
-	s.mux.HandleFunc("POST /v1/withdrawals/challenge", s.handleWithdrawalChallenge)
-	s.mux.HandleFunc("POST /v1/withdrawals", s.handleWithdraw)
 	if err := s.routeQueuePage(); err != nil {
 		s.Close()
 		return nil, err
@@ -244,190 +156,19 @@ func versionedIndex() ([]byte, error) {
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.mux.ServeHTTP(w, r) }
 
 func (s *Server) Close() error {
-	s.deposits.Close()
-	s.payouts.Close()
 	s.tasks.Close()
 	return s.db.Close()
 }
 
-func (s *Server) handleChallenge(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Wallet string `json:"wallet"`
-	}
-	if !decodeJSON(w, r, &req) {
-		return
-	}
-	c, err := s.customers.Challenge(r.Context(), req.Wallet)
-	if errors.Is(err, customer.ErrInvalidWallet) {
-		writeError(w, http.StatusBadRequest, "invalid_wallet")
-		return
-	}
-	if err != nil {
-		s.internalError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusCreated, map[string]any{
-		"nonce":      c.Nonce,
-		"message":    c.Message,
-		"expires_at": c.ExpiresAt.UTC().Format(time.RFC3339Nano),
-	})
-}
-
-// handleRegister creates a Customer, or rotates an existing Customer's API key,
-// once the caller proves they own the wallet by signing its challenge.
-func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Wallet    string `json:"wallet"`
-		Nonce     string `json:"nonce"`
-		Signature string `json:"signature"` // base58 ed25519 over the challenge message
-	}
-	if !decodeJSON(w, r, &req) {
-		return
-	}
-	reg, err := s.customers.Register(r.Context(), req.Wallet, req.Nonce, req.Signature)
-	if err == nil {
-		// If this fails the caller gets a 500 and registers again, which
-		// rotates the key and retries the attribution.
-		err = deposit.Attribute(r.Context(), s.db, reg.CustomerID, req.Wallet)
-	}
-	switch {
-	case errors.Is(err, customer.ErrInvalidWallet):
-		writeError(w, http.StatusBadRequest, "invalid_wallet")
-		return
-	case errors.Is(err, customer.ErrInvalidProof):
-		writeError(w, http.StatusUnauthorized, "invalid_proof")
-		return
-	case err != nil:
-		s.internalError(w, err)
-		return
-	}
-	status := http.StatusOK
-	if reg.New {
-		status = http.StatusCreated
-	}
-	writeJSON(w, status, map[string]any{"customer_id": reg.CustomerID, "api_key": reg.APIKey})
-}
-
-// auth resolves the Bearer API key to a Customer id, or responds 401.
-func (s *Server) auth(next func(w http.ResponseWriter, r *http.Request, customerID string)) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if customerID, ok := s.authenticate(w, r); ok {
-			next(w, r, customerID)
-		}
-	}
-}
-
-// authenticate resolves the Bearer API key to a Customer id. If it cannot,
-// it writes the response and reports false.
-func (s *Server) authenticate(w http.ResponseWriter, r *http.Request) (string, bool) {
-	key, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if !ok || key == "" {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
-		return "", false
-	}
-	customerID, err := s.customers.Authenticate(r.Context(), key)
-	if errors.Is(err, customer.ErrUnknownAPIKey) {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
-		return "", false
-	}
-	if err != nil {
-		s.internalError(w, err)
-		return "", false
-	}
-	return customerID, true
-}
-
-func (s *Server) handleBalance(w http.ResponseWriter, r *http.Request, customerID string) {
-	b, err := ledger.GetBalance(r.Context(), s.db, customerID)
-	if err != nil {
-		s.internalError(w, err)
-		return
-	}
-	recent, err := s.tasks.Recent(r.Context(), customerID, recentTasksLimit)
-	if err != nil {
-		s.internalError(w, err)
-		return
-	}
-	tasks := make([]map[string]any, 0, len(recent))
-	for _, t := range recent {
-		tasks = append(tasks, map[string]any{
-			"task_id":    t.ID,
-			"page_url":   t.PageURL,
-			"state":      t.State,
-			"created_at": t.CreatedAt.UTC().Format(time.RFC3339Nano),
-		})
-	}
-	recentDeposits, err := deposit.Recent(r.Context(), s.db, customerID, recentDepositsLimit)
-	if err != nil {
-		s.internalError(w, err)
-		return
-	}
-	deposits := make([]map[string]any, 0, len(recentDeposits))
-	for _, d := range recentDeposits {
-		deposits = append(deposits, map[string]any{
-			"signature":  d.Signature,
-			"amount":     d.Amount,
-			"created_at": d.CreatedAt.UTC().Format(time.RFC3339Nano),
-		})
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"available": b.Available, "held": b.Held, "tasks": tasks, "deposits": deposits,
-	})
-}
-
-// handleDevCredit stands in for Deposits; it is only routed in dev mode.
-func (s *Server) handleDevCredit(w http.ResponseWriter, r *http.Request, customerID string) {
-	var req struct {
-		Amount int64 `json:"amount"`
-	}
-	if !decodeJSON(w, r, &req) {
-		return
-	}
-	if req.Amount <= 0 {
-		writeError(w, http.StatusBadRequest, "invalid_amount")
-		return
-	}
-	if err := ledger.Credit(r.Context(), s.db, customerID, req.Amount); err != nil {
-		s.internalError(w, err)
-		return
-	}
-	s.handleBalance(w, r, customerID)
-}
-
-// handleCreateTask creates a Task for the Customer whose API key the request
-// carries. With payments off a request with no API key may name the Customer
-// by wallet address instead: nothing is spent, so nothing proves the wallet.
+// handleCreateTask creates a Task for an Agent's blocked page. Anyone may
+// create one: an Agent needs no key and no account.
 func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
-	var customerID string
-	if s.cfg.Payments || r.Header.Get("Authorization") != "" {
-		var ok bool
-		if customerID, ok = s.authenticate(w, r); !ok {
-			return
-		}
-	}
 	var req struct {
 		PageURL  string `json:"page_url"`
 		Obstacle string `json:"obstacle"`
-		Wallet   string `json:"wallet"` // read only when there is no API key
 	}
 	if !decodeJSON(w, r, &req) {
 		return
-	}
-	if customerID == "" {
-		if req.Wallet == "" {
-			writeError(w, http.StatusUnauthorized, "unauthorized")
-			return
-		}
-		var err error
-		customerID, err = s.customers.ForWallet(r.Context(), req.Wallet)
-		if errors.Is(err, customer.ErrInvalidWallet) {
-			writeError(w, http.StatusBadRequest, "invalid_wallet")
-			return
-		}
-		if err != nil {
-			s.internalError(w, err)
-			return
-		}
 	}
 	if !isPageURL(req.PageURL) {
 		writeError(w, http.StatusBadRequest, "invalid_page_url")
@@ -438,17 +179,7 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_obstacle")
 		return
 	}
-	created, err := s.tasks.Create(r.Context(), customerID, req.PageURL, obstacle)
-	var insufficient *ledger.InsufficientError
-	if errors.As(err, &insufficient) {
-		writeJSON(w, http.StatusPaymentRequired, map[string]any{
-			"error":          "insufficient_balance",
-			"available":      insufficient.Available,
-			"price":          s.cfg.Price,
-			"service_wallet": s.cfg.ServiceWallet,
-		})
-		return
-	}
+	created, err := s.tasks.Create(r.Context(), req.PageURL, obstacle)
 	if err != nil {
 		s.internalError(w, err)
 		return

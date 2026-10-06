@@ -4,8 +4,6 @@ import type { Page } from "playwright";
 
 import type { ClearedCheck } from "../src/index.ts";
 
-const UNSTUCK_URL = (process.env.UNSTUCK_URL ?? "http://localhost:8080").replace(/\/$/, "");
-
 // Reports whether the page holds a CAPTCHA token: from the widget's API, or
 // from the hidden response field reCAPTCHA and hCaptcha fill in on success.
 // The script is a string: tsx would wrap a function's inner functions in a
@@ -27,18 +25,6 @@ export const hasCaptchaToken = (page: Page) => page.evaluate<boolean>(CAPTCHA_TO
 // navigated away (e.g. an interstitial that redirects after the check).
 export function captchaCleared(blockedUrl: string): ClearedCheck {
   return async (page) => page.url() !== blockedUrl || hasCaptchaToken(page);
-}
-
-// The Balance needs the API key: an Agent that names its Customer by wallet
-// on a backend with payments off has none to show.
-export async function balance(): Promise<string> {
-  if (!process.env.UNSTUCK_API_KEY) return "n/a (no API key)";
-  const res = await fetch(`${UNSTUCK_URL}/v1/balance`, {
-    headers: { Authorization: `Bearer ${process.env.UNSTUCK_API_KEY}` },
-  });
-  if (!res.ok) return "unknown";
-  const { available } = (await res.json()) as { available: number };
-  return `${(available / 1e6).toFixed(2)} USDC`;
 }
 
 export const say = (who: string, text: string) => console.log(`\n${who}: ${text}`);

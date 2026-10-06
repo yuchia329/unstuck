@@ -1,8 +1,17 @@
 # Production plan
 
-Status: agreed 2026-10-03. Nothing here is built yet unless it says so.
+Status: agreed 2026-10-03, revised 2026-10-05 (see [Change of 2026-10-05](#change-of-2026-10-05-no-wallets-or-payments-in-the-code)). Nothing here is built yet unless it says so.
 
 This records the decisions taken in moving Unstuck from a hackathon demo to a public beta, and the order to build them in. Terms follow [CONTEXT.md](../CONTEXT.md); new terms are listed under [Glossary changes](#glossary-changes).
+
+## Change of 2026-10-05: no wallets or payments in the code
+
+Decided by the author on 2026-10-05, after this plan was agreed. Where the two disagree, this section wins. The sections below are otherwise left as agreed.
+
+- **A person is identified by an email address or a social sign-in, never by a wallet.** A wallet is a way to pay or be paid, attached to an identity once payments exist. [Identity and login](#identity-and-login) already said this.
+- **The code on `main` shows remote solving and nothing else.** Wallets, Customer registration, API keys, Deposits, the Balance, Holds, Earnings and Withdrawals were removed, not kept behind a flag. This replaces "Payment code stays, behind a flag" under [Beta principles](#beta-principles), "payments behind a flag" in build step 1, and [Payments (off in beta)](#payments-off-in-beta) as a description of the code. When payments come they are built again, on accounts.
+- **Until sign-in is built nobody signs in.** An Agent creates a Task with no key. A Solver is a random id that the Queue page keeps in the browser. Nothing proves either.
+- **Left open by this change:** what an Agent presents before accounts and API keys exist, how the Shadow price is shown with no Ledger, and abuse control while creating a Task is open to anyone.
 
 ## Direction
 
@@ -17,7 +26,7 @@ The code is open source. The moat is the Solver network and the ecosystem of int
 ## Beta principles
 
 - **Free, indefinitely.** No Deposits are required and no Solver is paid. There is no paid launch date; payments switch on when the market test says so.
-- **Payment code stays, behind a flag.** Deposits, Holds, Earnings and Withdrawals keep working in code and tests, but are off in the beta. Dashboards show Earnings as 0.00 with a "beta" label.
+- **Payment code stays, behind a flag.** Deposits, Holds, Earnings and Withdrawals keep working in code and tests, but are off in the beta. Dashboards show Earnings as 0.00 with a "beta" label. *Superseded on 2026-10-05: the payment code was removed. See the change above.*
 - **Shadow price.** Both sides see what a Task would cost and earn: "Beta: free. Planned price: $0.40/Task."
 - **Low friction over identity.** No wallet is needed, and a Solver can start as a guest with no sign-in; but every Solver has an identity (see [Identity and login](#identity-and-login)).
 

@@ -16,7 +16,7 @@ import { createInterface } from "node:readline";
 import { type Browser, chromium, type Page } from "playwright";
 
 import { UnstuckError, solve } from "../src/index.ts";
-import { balance, hasCaptchaToken, say } from "./common.ts";
+import { hasCaptchaToken, say } from "./common.ts";
 
 const VERIFY_REQUEST = "@@unstuck verify";
 
@@ -49,13 +49,12 @@ try {
   // A token already on the page is not the Solver's work.
   const hadToken = await hasCaptchaToken(page).catch(() => false);
   const tokenIssued = async (p: Page) => !hadToken && (await hasCaptchaToken(p));
-  say("Unstuck", `Balance ${await balance()}.`);
   await solve(page, {
     obstacle,
     cleared: tokenIssued,
     verify: async (p) => (await tokenIssued(p)) || askJev(),
   });
-  say("Unstuck", `The Task is Solved. Balance ${await balance()}.`);
+  say("Unstuck", "The Task is Solved.");
 } catch (err) {
   if (!(err instanceof UnstuckError)) throw err;
   console.log(`\n${err.message}`); // already starts with "Unstuck:"

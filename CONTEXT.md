@@ -1,6 +1,6 @@
 # Unstuck
 
-Human-in-the-loop unblocking for AI agents. When an Agent hits a challenge it cannot pass (e.g. reCAPTCHA), a human Solver remotely controls the Agent's browser to clear it, paid from the Customer's prepaid balance.
+Human-in-the-loop unblocking for AI agents. When an Agent hits a challenge it cannot pass (e.g. reCAPTCHA), a human Solver remotely controls the Agent's browser to clear it. Nobody signs in and nothing is paid.
 
 ## Language
 
@@ -9,47 +9,12 @@ The Customer's automated browser program. Not part of Unstuck; it only embeds th
 _Avoid_: bot, client
 
 **Customer**:
-The party that owns an Agent and pays for unblocking. Identified by their Solana wallet. With payments on, the Customer proves the wallet and uses an API key; with payments off, the Agent names the wallet and nothing proves it.
+The party that owns an Agent. Unstuck keeps nothing about a Customer: an Agent creates Tasks with no account and no key.
 _Avoid_: user, client, account
 
 **Solver**:
-The human who remotely operates an Agent's browser to clear a challenge.
+The human who remotely operates an Agent's browser to clear a challenge. A Solver does not sign in: the Queue page makes up an id on a first visit and keeps it in that browser, and whoever presents the id is that Solver.
 _Avoid_: user, worker, operator
-
-**Deposit**:
-USDC sent from a Customer's registered wallet to the Unstuck service wallet, credited to that Customer's Balance.
-_Avoid_: top-up, payment
-
-**Unattributed Deposit**:
-A Deposit from a wallet no Customer has registered. Credited automatically if that wallet later registers; otherwise kept, never auto-refunded.
-_Avoid_: orphan, unknown payment
-
-**Price**:
-The fixed USDC amount held per Task. Same for every Task.
-_Avoid_: fee, cost
-
-**Earning**:
-The Solver's share (80%) of a captured Hold.
-_Avoid_: payout, reward
-
-**Withdrawal**:
-A Solver taking all their available Earnings, paid in USDC from the hot wallet to the wallet that earned them, after signing a withdrawal challenge. Ends confirmed or failed; a failed one's Earnings are available again.
-_Avoid_: payout (for the request), cash out
-
-**Hot wallet**:
-The wallet whose key the backend holds to pay Withdrawals. Separate from the service wallet, which receives Deposits and whose key stays in MetaMask.
-
-**Fee**:
-Unstuck's share (20%) of a captured Hold.
-_Avoid_: commission, cut
-
-**Balance**:
-The Customer's funds held by Unstuck; split into available and held.
-_Avoid_: wallet, credit
-
-**Hold**:
-Funds reserved from a Customer's available Balance for one Task; later captured (Task solved) or released (Task not solved).
-_Avoid_: deduction, charge, refund
 
 **Challenge**:
 The obstacle blocking an Agent's page that needs a human (reCAPTCHA, slider puzzle, etc.). The Agent may describe it in one sentence when it creates the Task (the Task's `obstacle`); Solvers see that before they Claim, and it is the whole scope of their work: the Agent does the rest itself.
@@ -81,7 +46,7 @@ How long a Solver has after Claim before the Task Fails.
 The Solver's report that the Challenge is cleared. The Agent takes the page back and checks it with its verify check; if the Challenge is still there, the Solver is told so and keeps the page.
 
 **Solved**:
-Task outcome where the Bridge confirmed the Challenge is cleared: by the Agent's cleared check (reCAPTCHA check by default), or by its verify check after the Solver's Done. The only outcome that captures the Hold.
+Task outcome where the Bridge confirmed the Challenge is cleared: by the Agent's cleared check (reCAPTCHA check by default), or by its verify check after the Solver's Done.
 
 **Expired**:
 Task outcome where no Solver claimed it within the claim window.

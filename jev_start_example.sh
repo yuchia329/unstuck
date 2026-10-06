@@ -1,9 +1,8 @@
 #!/bin/sh
 # Runs the Jev Ultrafast demo Agent (bridge/demo/jev/run.py) against the public backend.
 # Opens the site, then asks for the task in the terminal.
-# Copy this file, then fill in the two keys and the wallet address below. Do not commit the copy: it holds API keys.
-#
-# No Unstuck API key: the backend runs with payments off, so the Agent names its Customer by wallet address.
+# Copy this file, then fill in the two keys below. Do not commit the copy: it holds API keys.
+# Unstuck itself needs no key.
 
 # Jev picks each action (console.typesafe.ai/keys).
 export TYPESAFE_API_KEY="apikey_..."
@@ -13,12 +12,9 @@ export GEMINI_API_KEY="AQ...."
 # Starting page size; resizing Chrome's window resizes the page. 480x720 suits a Solver on a phone.
 # export JEV_VIEWPORT=800x900
 
-# Any Solana wallet address you own. It names your Customer; nothing is charged and nothing is signed.
-unset UNSTUCK_API_KEY
-export UNSTUCK_WALLET="..."
 export UNSTUCK_URL=https://unstuck.yuchia.dev
 
-for k in TYPESAFE_API_KEY GEMINI_API_KEY UNSTUCK_WALLET; do
+for k in TYPESAFE_API_KEY GEMINI_API_KEY; do
   eval "v=\$$k"
   case "$v" in
     "" | *...*) echo "Set $k in $0." >&2; exit 1 ;;

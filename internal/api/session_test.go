@@ -14,9 +14,7 @@ import (
 
 func TestSessionTokenCannotJoinAnotherTasksSession(t *testing.T) {
 	h := newHarness(t, func(c *api.Config) { c.ClaimWindow = time.Hour })
-	key := h.register()
-	h.credit(key, 20_000)
-	a, b := h.createTask(key), h.createTask(key)
+	a, b := h.createTask(), h.createTask()
 
 	for name, token := range map[string]string{
 		"other task's token": a.body["session_token"].(string),
@@ -46,9 +44,7 @@ func frame(data string) map[string]any {
 
 func TestClaimingSolverSeesLiveFramesOfTheAgentsPage(t *testing.T) {
 	h := newHarness(t, func(c *api.Config) { c.ClaimWindow, c.SolveWindow = time.Hour, time.Hour })
-	key := h.register()
-	h.credit(key, 10_000)
-	created := h.createTask(key)
+	created := h.createTask()
 	id := created.body["task_id"].(string)
 	b := h.connectBridge(created)
 	s := h.connectSolver()
@@ -73,9 +69,7 @@ func TestClaimingSolverSeesLiveFramesOfTheAgentsPage(t *testing.T) {
 
 func TestFramesAreShownOnlyToTheClaimingSolver(t *testing.T) {
 	h := newHarness(t, func(c *api.Config) { c.ClaimWindow, c.SolveWindow = time.Hour, time.Hour })
-	key := h.register()
-	h.credit(key, 10_000)
-	created := h.createTask(key)
+	created := h.createTask()
 	id := created.body["task_id"].(string)
 	b := h.connectBridge(created)
 	claimer, other := h.connectSolver(), h.connectSolver()
@@ -91,9 +85,7 @@ func TestFramesAreShownOnlyToTheClaimingSolver(t *testing.T) {
 
 func TestClaimingSolversPointerEventsReachTheBridge(t *testing.T) {
 	h := newHarness(t, func(c *api.Config) { c.ClaimWindow, c.SolveWindow = time.Hour, time.Hour })
-	key := h.register()
-	h.credit(key, 10_000)
-	created := h.createTask(key)
+	created := h.createTask()
 	id := created.body["task_id"].(string)
 	b := h.connectBridge(created)
 	s := h.connectSolver()
@@ -113,9 +105,7 @@ func TestClaimingSolversPointerEventsReachTheBridge(t *testing.T) {
 
 func TestClaimingSolversMoveAndWheelEventsReachTheBridgeInOrder(t *testing.T) {
 	h := newHarness(t, func(c *api.Config) { c.ClaimWindow, c.SolveWindow = time.Hour, time.Hour })
-	key := h.register()
-	h.credit(key, 10_000)
-	created := h.createTask(key)
+	created := h.createTask()
 	id := created.body["task_id"].(string)
 	b := h.connectBridge(created)
 	s := h.connectSolver()
@@ -149,9 +139,7 @@ func TestClaimingSolversMoveAndWheelEventsReachTheBridgeInOrder(t *testing.T) {
 
 func TestWheelInputIsValidated(t *testing.T) {
 	h := newHarness(t, func(c *api.Config) { c.ClaimWindow, c.SolveWindow = time.Hour, time.Hour })
-	key := h.register()
-	h.credit(key, 10_000)
-	created := h.createTask(key)
+	created := h.createTask()
 	id := created.body["task_id"].(string)
 	b := h.connectBridge(created)
 	s := h.connectSolver()
@@ -171,9 +159,7 @@ func TestWheelInputIsValidated(t *testing.T) {
 
 func TestClaimingSolversKeyboardEventsReachTheBridgeInOrder(t *testing.T) {
 	h := newHarness(t, func(c *api.Config) { c.ClaimWindow, c.SolveWindow = time.Hour, time.Hour })
-	key := h.register()
-	h.credit(key, 10_000)
-	created := h.createTask(key)
+	created := h.createTask()
 	id := created.body["task_id"].(string)
 	b := h.connectBridge(created)
 	s := h.connectSolver()
@@ -207,9 +193,7 @@ func TestClaimingSolversKeyboardEventsReachTheBridgeInOrder(t *testing.T) {
 
 func TestKeyboardInputIsValidated(t *testing.T) {
 	h := newHarness(t, func(c *api.Config) { c.ClaimWindow, c.SolveWindow = time.Hour, time.Hour })
-	key := h.register()
-	h.credit(key, 10_000)
-	created := h.createTask(key)
+	created := h.createTask()
 	id := created.body["task_id"].(string)
 	b := h.connectBridge(created)
 	s := h.connectSolver()
@@ -234,9 +218,7 @@ func TestKeyboardInputIsValidated(t *testing.T) {
 
 func TestReconnectingSolverResumesTheSessionOfTheirClaim(t *testing.T) {
 	h := newHarness(t, func(c *api.Config) { c.ClaimWindow, c.SolveWindow = time.Hour, time.Hour })
-	key := h.register()
-	h.credit(key, 10_000)
-	created := h.createTask(key)
+	created := h.createTask()
 	id := created.body["task_id"].(string)
 	b := h.connectBridge(created)
 	first := h.connectSolver()
@@ -245,7 +227,7 @@ func TestReconnectingSolverResumesTheSessionOfTheirClaim(t *testing.T) {
 	first.next("frame", id)
 	first.conn.Close(websocket.StatusNormalClosure, "")
 
-	again := h.connectSolverAs(first.wallet)
+	again := h.connectSolverAs(first.id)
 
 	m := again.next("claimed", id)
 	if m["page_url"] != "https://www.google.com/recaptcha/api2/demo" {
@@ -263,11 +245,9 @@ func TestReconnectingSolverResumesTheSessionOfTheirClaim(t *testing.T) {
 	}
 }
 
-func TestAnotherWalletCannotResumeASolversSession(t *testing.T) {
+func TestAnotherSolverCannotResumeASolversSession(t *testing.T) {
 	h := newHarness(t, func(c *api.Config) { c.ClaimWindow, c.SolveWindow = time.Hour, time.Hour })
-	key := h.register()
-	h.credit(key, 10_000)
-	created := h.createTask(key)
+	created := h.createTask()
 	id := created.body["task_id"].(string)
 	b := h.connectBridge(created)
 	h.connectSolver().mustClaim(id)
@@ -285,9 +265,7 @@ func TestAnotherWalletCannotResumeASolversSession(t *testing.T) {
 
 func TestInputFromASolverWithoutTheClaimIsNotForwarded(t *testing.T) {
 	h := newHarness(t, func(c *api.Config) { c.ClaimWindow, c.SolveWindow = time.Hour, time.Hour })
-	key := h.register()
-	h.credit(key, 10_000)
-	created := h.createTask(key)
+	created := h.createTask()
 	id := created.body["task_id"].(string)
 	b := h.connectBridge(created)
 	other := h.connectSolver()
@@ -304,9 +282,7 @@ func TestInputFromASolverWithoutTheClaimIsNotForwarded(t *testing.T) {
 
 func TestSolverInputIsValidated(t *testing.T) {
 	h := newHarness(t, func(c *api.Config) { c.ClaimWindow, c.SolveWindow = time.Hour, time.Hour })
-	key := h.register()
-	h.credit(key, 10_000)
-	created := h.createTask(key)
+	created := h.createTask()
 	id := created.body["task_id"].(string)
 	b := h.connectBridge(created)
 	s := h.connectSolver()
@@ -327,9 +303,7 @@ func TestSolverInputIsValidated(t *testing.T) {
 
 func TestBridgeIsToldWhenItsTaskIsClaimed(t *testing.T) {
 	h := newHarness(t, func(c *api.Config) { c.ClaimWindow, c.SolveWindow = time.Hour, time.Hour })
-	key := h.register()
-	h.credit(key, 10_000)
-	created := h.createTask(key)
+	created := h.createTask()
 	b := h.connectBridge(created)
 
 	h.connectSolver().mustClaim(created.body["task_id"].(string))
@@ -339,11 +313,9 @@ func TestBridgeIsToldWhenItsTaskIsClaimed(t *testing.T) {
 	}
 }
 
-func TestSolvedCapturesTheHoldAsEarningAndFee(t *testing.T) {
+func TestSolvedReachesTheBridgeAndTheClaimingSolver(t *testing.T) {
 	h := newHarness(t, func(c *api.Config) { c.ClaimWindow, c.SolveWindow = time.Hour, time.Hour })
-	key := h.register()
-	h.credit(key, 15_000)
-	created := h.createTask(key)
+	created := h.createTask()
 	id := created.body["task_id"].(string)
 	b := h.connectBridge(created)
 	s := h.connectSolver()
@@ -352,42 +324,29 @@ func TestSolvedCapturesTheHoldAsEarningAndFee(t *testing.T) {
 	b.send(map[string]any{"type": "solved"})
 
 	b.next("solved")
-	m := s.next("task_solved", id)
-	if num(m["earning"]) != 8_000 || num(m["fee"]) != 2_000 {
-		t.Errorf("task_solved = %v, want earning 8000 and fee 2000", m)
-	}
-	if got := h.taskState(key, id); got != "solved" {
+	s.next("task_solved", id)
+	if got := h.taskState(id); got != "solved" {
 		t.Errorf("state = %s, want solved", got)
-	}
-	if available, held := h.balance(key); available != 5_000 || held != 0 {
-		t.Errorf("balance = %d/%d, want 5000/0", available, held)
 	}
 }
 
 func TestSolvedBeforeAnyClaimIsIgnored(t *testing.T) {
 	h := newHarness(t, func(c *api.Config) { c.ClaimWindow = time.Hour })
-	key := h.register()
-	h.credit(key, 10_000)
-	created := h.createTask(key)
+	created := h.createTask()
 	id := created.body["task_id"].(string)
 	b := h.connectBridge(created)
 
 	b.send(map[string]any{"type": "solved"})
 
 	b.never("solved", 100*time.Millisecond)
-	if got := h.taskState(key, id); got != "pending" {
+	if got := h.taskState(id); got != "pending" {
 		t.Errorf("state = %s, want pending", got)
-	}
-	if available, held := h.balance(key); available != 0 || held != 10_000 {
-		t.Errorf("balance = %d/%d, want 0/10000", available, held)
 	}
 }
 
 func TestClosingTheBridgeWhileClaimedFailsTheTask(t *testing.T) {
 	h := newHarness(t, func(c *api.Config) { c.ClaimWindow, c.SolveWindow = time.Hour, time.Hour })
-	key := h.register()
-	h.credit(key, 10_000)
-	created := h.createTask(key)
+	created := h.createTask()
 	id := created.body["task_id"].(string)
 	b := h.connectBridge(created)
 	s := h.connectSolver()
@@ -398,19 +357,14 @@ func TestClosingTheBridgeWhileClaimedFailsTheTask(t *testing.T) {
 	if m := s.next("task_failed", id); m["reason"] != "bridge_disconnected" {
 		t.Errorf("reason = %v, want bridge_disconnected", m["reason"])
 	}
-	if got := h.taskState(key, id); got != "failed" {
+	if got := h.taskState(id); got != "failed" {
 		t.Errorf("state = %s, want failed", got)
-	}
-	if available, held := h.balance(key); available != 10_000 || held != 0 {
-		t.Errorf("balance = %d/%d, want 10000/0", available, held)
 	}
 }
 
 func TestClosingTheBridgeBeforeAClaimFailsTheTaskAndRemovesItFromTheQueue(t *testing.T) {
 	h := newHarness(t, func(c *api.Config) { c.ClaimWindow = time.Hour })
-	key := h.register()
-	h.credit(key, 10_000)
-	created := h.createTask(key)
+	created := h.createTask()
 	id := created.body["task_id"].(string)
 	b := h.connectBridge(created)
 	s := h.connectSolver()
@@ -419,11 +373,8 @@ func TestClosingTheBridgeBeforeAClaimFailsTheTaskAndRemovesItFromTheQueue(t *tes
 	b.conn.Close(websocket.StatusNormalClosure, "")
 
 	s.next("task_removed", id)
-	if got := h.taskState(key, id); got != "failed" {
+	if got := h.taskState(id); got != "failed" {
 		t.Errorf("state = %s, want failed", got)
-	}
-	if available, held := h.balance(key); available != 10_000 || held != 0 {
-		t.Errorf("balance = %d/%d, want 10000/0", available, held)
 	}
 	if reply := s.claim(id); reply["type"] != "claim_failed" {
 		t.Errorf("claim reply = %v, want claim_failed", reply)
@@ -432,9 +383,7 @@ func TestClosingTheBridgeBeforeAClaimFailsTheTaskAndRemovesItFromTheQueue(t *tes
 
 func TestTaskWhoseBridgeNeverJoinedStaysQueued(t *testing.T) {
 	h := newHarness(t, func(c *api.Config) { c.ClaimWindow = time.Hour })
-	key := h.register()
-	h.credit(key, 10_000)
-	created := h.createTask(key)
+	created := h.createTask()
 	id := created.body["task_id"].(string)
 	// A refused join is not a Bridge leaving.
 	h.dialBridge(id, "st_nope")
@@ -444,9 +393,7 @@ func TestTaskWhoseBridgeNeverJoinedStaysQueued(t *testing.T) {
 
 func TestASecondBridgeCannotJoinALiveSession(t *testing.T) {
 	h := newHarness(t, func(c *api.Config) { c.ClaimWindow, c.SolveWindow = time.Hour, time.Hour })
-	key := h.register()
-	h.credit(key, 10_000)
-	created := h.createTask(key)
+	created := h.createTask()
 	id := created.body["task_id"].(string)
 	h.connectBridge(created)
 	s := h.connectSolver()
@@ -460,16 +407,14 @@ func TestASecondBridgeCannotJoinALiveSession(t *testing.T) {
 		t.Errorf("second bridge read: %v, want close with policy violation", err)
 	}
 	s.never("task_failed", id, 100*time.Millisecond)
-	if got := h.taskState(key, id); got != "claimed" {
+	if got := h.taskState(id); got != "claimed" {
 		t.Errorf("state = %s, want claimed", got)
 	}
 }
 
 func TestSolvedArrivingAfterTheTaskFailedIsIgnored(t *testing.T) {
 	h := newHarness(t, func(c *api.Config) { c.ClaimWindow = time.Hour })
-	key := h.register()
-	h.credit(key, 10_000)
-	created := h.createTask(key)
+	created := h.createTask()
 	id := created.body["task_id"].(string)
 	b := h.connectBridge(created)
 	s := h.connectSolver()
@@ -482,28 +427,21 @@ func TestSolvedArrivingAfterTheTaskFailedIsIgnored(t *testing.T) {
 
 	b.never("solved", 100*time.Millisecond)
 	s.never("task_solved", id, 0)
-	if got := h.taskState(key, id); got != "failed" {
+	if got := h.taskState(id); got != "failed" {
 		t.Errorf("state = %s, want failed", got)
-	}
-	if available, held := h.balance(key); available != 10_000 || held != 0 {
-		t.Errorf("balance = %d/%d, want 10000/0", available, held)
 	}
 }
 
 func TestBridgeIsToldWhenItsTaskExpires(t *testing.T) {
 	h := newHarness(t)
-	key := h.register()
-	h.credit(key, 10_000)
-	b := h.connectBridge(h.createTask(key))
+	b := h.connectBridge(h.createTask())
 
 	b.next("expired")
 }
 
 func TestBridgeJoiningAfterTheClaimIsCaughtUp(t *testing.T) {
 	h := newHarness(t, func(c *api.Config) { c.ClaimWindow, c.SolveWindow = time.Hour, time.Hour })
-	key := h.register()
-	h.credit(key, 10_000)
-	created := h.createTask(key)
+	created := h.createTask()
 	id := created.body["task_id"].(string)
 	s := h.connectSolver()
 	s.mustClaim(id)
@@ -519,9 +457,7 @@ func TestBridgeJoiningAfterTheClaimIsCaughtUp(t *testing.T) {
 
 func TestReconnectingSolverSeesTheLatestFrameAtOnce(t *testing.T) {
 	h := newHarness(t, func(c *api.Config) { c.ClaimWindow, c.SolveWindow = time.Hour, time.Hour })
-	key := h.register()
-	h.credit(key, 10_000)
-	created := h.createTask(key)
+	created := h.createTask()
 	id := created.body["task_id"].(string)
 	b := h.connectBridge(created)
 	first := h.connectSolver()
@@ -529,7 +465,7 @@ func TestReconnectingSolverSeesTheLatestFrameAtOnce(t *testing.T) {
 	b.send(frame("latest"))
 	first.next("frame", id)
 
-	again := h.connectSolverAs(first.wallet)
+	again := h.connectSolverAs(first.id)
 
 	if m := again.next("frame", id); m["data"] != "latest" {
 		t.Errorf("frame = %v, want latest", m["data"])

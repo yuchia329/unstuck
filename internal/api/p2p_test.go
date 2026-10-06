@@ -16,9 +16,7 @@ import (
 func claimedSession(t *testing.T, mutate ...func(*api.Config)) (h *harness, id string, b *bridge, s *solver) {
 	t.Helper()
 	h = newHarness(t, append([]func(*api.Config){func(c *api.Config) { c.ClaimWindow, c.SolveWindow = time.Hour, time.Hour }}, mutate...)...)
-	key := h.register()
-	h.credit(key, 10_000)
-	created := h.createTask(key)
+	created := h.createTask()
 	id = created.body["task_id"].(string)
 	b = h.connectBridge(created)
 	s = h.connectSolver()
@@ -100,9 +98,7 @@ func TestClaimedCarriesICEServersWithShortLivedTURNCredentials(t *testing.T) {
 		c.TURNURLs = []string{"turn:turn.example.com:3478"}
 		c.TURNSecret = secret
 	})
-	key := h.register()
-	h.credit(key, 10_000)
-	created := h.createTask(key)
+	created := h.createTask()
 	id := created.body["task_id"].(string)
 	b := h.connectBridge(created)
 	s := h.connectSolver()
@@ -138,7 +134,7 @@ func TestClaimedCarriesICEServersWithShortLivedTURNCredentials(t *testing.T) {
 func TestResumedClaimCarriesICEServers(t *testing.T) {
 	h, id, _, s := claimedSession(t, func(c *api.Config) { c.STUNURLs = []string{"stun:stun.example.com:3478"} })
 
-	again := h.connectSolverAs(s.wallet)
+	again := h.connectSolverAs(s.id)
 
 	if servers, _ := again.next("claimed", id)["ice_servers"].([]any); len(servers) != 1 {
 		t.Errorf("ice_servers = %v, want the STUN server", servers)

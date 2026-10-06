@@ -22,9 +22,7 @@ func withPingsAndLongWindows(c *api.Config) {
 func TestClaimedTaskWhoseBridgeSendsNothingStaysClaimedBehindAnIdleTimeoutProxy(t *testing.T) {
 	h := newHarness(t, withPingsAndLongWindows)
 	proxied := h.through(idleProxy(t, h.url, proxyIdleTimeout))
-	key := h.register()
-	h.credit(key, testPrice)
-	created := h.createTask(key)
+	created := h.createTask()
 	taskID := created.body["task_id"].(string)
 	b := proxied.connectBridge(created)
 	s := proxied.connectSolver()
@@ -33,7 +31,7 @@ func TestClaimedTaskWhoseBridgeSendsNothingStaysClaimedBehindAnIdleTimeoutProxy(
 
 	// Neither the Bridge nor the Solver sends anything for 3 idle timeouts.
 	b.never("failed", 3*proxyIdleTimeout)
-	if got := h.taskState(key, taskID); got != "claimed" {
+	if got := h.taskState(taskID); got != "claimed" {
 		t.Fatalf("task state = %q, want claimed", got)
 	}
 
@@ -48,9 +46,7 @@ func TestIdleQueueSocketStaysOpenBehindAnIdleTimeoutProxy(t *testing.T) {
 
 	time.Sleep(3 * proxyIdleTimeout)
 
-	key := h.register()
-	h.credit(key, testPrice)
-	created := h.createTask(key)
+	created := h.createTask()
 	h.connectBridge(created)
 	s.next("task_added", created.body["task_id"].(string))
 }

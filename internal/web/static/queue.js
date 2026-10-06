@@ -1,5 +1,5 @@
-// Queue page: a Solver connects with their wallet, watches Pending Tasks
-// arrive live, and Claims one. During the Session the Agent's page is shown
+// Queue page: a Solver opens it, watches Pending Tasks arrive live, and
+// Claims one. There is no sign-in. During the Session the Agent's page is shown
 // live and the Solver's pointer, wheel and keyboard input is sent to the Bridge, over a
 // direct WebRTC connection when the Solver allows one and it comes up, and
 // through the backend otherwise.
@@ -10,7 +10,6 @@ const tasks = new Map(); // task id -> { pageURL, obstacle, since } where since 
 const claiming = new Map(); // task id -> { pageURL, obstacle }, while a Claim is in flight
 const early = new Map(); // task id -> frame that arrived before its claimed reply
 let socket = null;
-let wallet = "";
 // { id, pageURL, obstacle, deadline, iceServers, checking } for the Task this
 // Solver holds; checking while the Agent checks the Solver's Done.
 let claim = null;
@@ -19,36 +18,20 @@ const exposed = new Set(); // ids of Tasks whose Agent was sent this device's ad
 let blobURL = null; // the object URL on screen, released when replaced
 let retry = 0;
 
-// The demo Solver's wallet fills in when none is saved, and can be copied
-// into a Solana wallet app.
-const DEMO_WALLET = $("demo-wallet-address").textContent;
-$("wallet").value = DEMO_WALLET;
-try { $("wallet").value = localStorage.getItem("unstuck.wallet") || DEMO_WALLET; } catch {}
-
-$("copy-demo-wallet").addEventListener("click", async () => {
-  const button = $("copy-demo-wallet");
+// The page makes up this Solver's id on a first visit and keeps it, so a
+// reload, or a second tab, is the same Solver and resumes its Claim. The
+// backend takes whoever presents the id for that Solver, so it is long and
+// random. Without storage (e.g. private browsing) the id lasts until reload.
+const solver = (() => {
+  const KEY = "unstuck.solver";
   try {
-    await navigator.clipboard.writeText(DEMO_WALLET);
-    button.textContent = "Copied";
-    setTimeout(() => { button.textContent = "Copy"; }, 1500);
-  } catch {
-    // No clipboard access (plain http, or denied): select it for a manual copy.
-    getSelection().selectAllChildren($("demo-wallet-address"));
-  }
-});
-
-$("connect").addEventListener("submit", (e) => {
-  e.preventDefault();
-  wallet = $("wallet").value.trim();
-  if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(wallet)) {
-    notice("That is not a Solana wallet address.");
-    return;
-  }
-  notice("");
-  try { localStorage.setItem("unstuck.wallet", wallet); } catch {}
-  retry = 0;
-  connect();
-});
+    const saved = localStorage.getItem(KEY);
+    if (/^[0-9a-f]{32}$/.test(saved || "")) return saved;
+  } catch {}
+  const id = [...crypto.getRandomValues(new Uint8Array(16))].map((b) => b.toString(16).padStart(2, "0")).join("");
+  try { localStorage.setItem(KEY, id); } catch {}
+  return id;
+})();
 
 try { $("direct").checked = localStorage.getItem("unstuck.direct") !== "off"; } catch {}
 $("direct").addEventListener("change", () => {
@@ -76,7 +59,18 @@ $("done").addEventListener("click", () => {
 // to 0–1 of the displayed frame, so they do not depend on its size here; the
 // Bridge maps them onto the Agent's page with the frame's metadata. Only the
 // primary pointer is relayed: a second finger does nothing.
+//
+// A mouse or pen presses at once. A finger works as it does on a phone's own
+// pages: a tap clicks, a swipe scrolls the Agent's page, and a finger held
+// still for HOLD_MS presses, so moving it then drags, as a slider puzzle
+// needs.
 const screen = $("screen");
+const HOLD_MS = 350;
+const SLOP_PX = 8; // a finger that has moved this far is swiping, not tapping or holding
+// The finger on the page: { start, last, mode, timer }, with the pointer
+// events it began with and last moved to; mode is "pending" until it turns
+// out to be a "scroll" or a "drag".
+let touch = null;
 const INPUT_INTERVAL_MS = 25; // moves and wheel scrolls go out at up to 40 Hz
 let pressed = false; // a down was sent and its up was not
 let lastInput = 0;
@@ -89,19 +83,71 @@ screen.addEventListener("pointerdown", (e) => {
   e.preventDefault();
   screen.setPointerCapture(e.pointerId);
   flushInput();
-  pressed = pointer("down", e);
+  if (e.pointerType !== "touch") {
+    pressed = pointer("down", e);
+    return;
+  }
+  endTouch();
+  const t = { start: e, last: e, mode: "pending", timer: 0 };
+  t.timer = setTimeout(() => {
+    if (touch !== t) return;
+    t.mode = "drag";
+    pressed = pointer("down", t.last);
+    screen.classList.add("dragging");
+  }, HOLD_MS);
+  touch = t;
 });
 screen.addEventListener("pointermove", (e) => {
   if (!e.isPrimary) return;
+  if (touch && e.pointerType === "touch") {
+    const t = touch;
+    if (t.mode === "pending" && Math.hypot(e.clientX - t.start.clientX, e.clientY - t.start.clientY) > SLOP_PX) {
+      clearTimeout(t.timer);
+      t.mode = "scroll";
+    }
+    if (t.mode === "scroll") swipe(t, e);
+    t.last = e;
+    if (t.mode !== "drag") return;
+  }
   pendingMove = e;
   scheduleInput();
 });
 const release = (e) => {
-  if (!e.isPrimary || !pressed) return;
+  if (!e.isPrimary) return;
+  if (touch && e.pointerType === "touch") {
+    const t = touch;
+    endTouch();
+    if (t.mode !== "drag") {
+      flushInput(); // what is left of a swipe
+      // A tap: the press and the release go together.
+      if (t.mode === "pending" && e.type === "pointerup" && pointer("down", t.start)) pointer("up", e);
+      return;
+    }
+  }
+  if (!pressed) return;
   pressed = false;
   flushInput();
   pointer("up", e);
 };
+
+// swipe scrolls the Agent's page by as much of the frame as the finger moved,
+// the other way: the page follows the finger. It scrolls what the finger
+// landed on, as a wheel there would.
+function swipe(t, e) {
+  const r = screen.getBoundingClientRect();
+  const w = pendingWheel || (pendingWheel = { dx: 0, dy: 0 });
+  w.e = { clientX: t.start.clientX, clientY: t.start.clientY, timeStamp: e.timeStamp };
+  w.dx -= (e.clientX - t.last.clientX) / r.width;
+  w.dy -= (e.clientY - t.last.clientY) / r.height;
+  scheduleInput();
+}
+
+function endTouch() {
+  if (!touch) return;
+  clearTimeout(touch.timer);
+  touch = null;
+  screen.classList.remove("dragging");
+}
 screen.addEventListener("pointerup", release);
 screen.addEventListener("pointercancel", release);
 screen.addEventListener("contextmenu", (e) => e.preventDefault());
@@ -231,14 +277,14 @@ function position(e) {
 function connect() {
   if (socket) socket.close();
   tasks.clear();
-  claim = null; // the server resends a Claim this wallet still holds
+  claim = null; // the server resends a Claim this Solver still holds
   pressed = false;
   render();
   const scheme = location.protocol === "https:" ? "wss" : "ws";
-  const ws = new WebSocket(`${scheme}://${location.host}/v1/queue?wallet=${encodeURIComponent(wallet)}`);
+  const ws = new WebSocket(`${scheme}://${location.host}/v1/queue?solver=${solver}`);
   socket = ws;
   status("Connecting…");
-  ws.onopen = () => { retry = 0; status(`Connected as ${short(wallet)}.`); loadEarnings(); };
+  ws.onopen = () => { retry = 0; status("Connected."); };
   ws.onmessage = (e) => handle(JSON.parse(e.data));
   ws.onclose = () => {
     if (socket !== ws) return; // replaced by a newer connection
@@ -302,9 +348,7 @@ function handle(m) {
       break;
     case "task_solved":
       if (claim && claim.id === m.task_id) claim = null;
-      // With payments off a Task is free and earns nothing.
-      notice(m.earning ? `Solved! Earning of ${usdc(m.earning)} USDC recorded.` : "Solved!");
-      loadEarnings();
+      notice("Solved!");
       break;
     case "rtc_answer":
       if (peer && peer.taskId === m.task_id && !peer.token) {
@@ -361,7 +405,8 @@ function render() {
   } else {
     closePeer();
     screen.hidden = true;
-    keysField.hidden = $("keys-hint").hidden = true;
+    endTouch();
+    keysField.hidden = $("keys-hint").hidden = $("touch-hint").hidden = true;
     keysField.value = "";
     keysField.blur();
     showImage(null);
@@ -406,6 +451,7 @@ function showImage(src) {
     screen.src = blobURL || src;
     screen.hidden = false;
     keysField.hidden = $("keys-hint").hidden = false;
+    $("touch-hint").hidden = !navigator.maxTouchPoints;
     $("screen-wait").hidden = true;
   }
   if (old) URL.revokeObjectURL(old);
@@ -513,8 +559,6 @@ function renderLink() {
   $("link").textContent = text;
 }
 
-function usdc(units) { return (units / 1e6).toFixed(6).replace(/0+$/, "").replace(/\.$/, ""); }
-
 function status(text) { $("status").textContent = text; }
 
 function notice(text) {
@@ -522,151 +566,4 @@ function notice(text) {
   $("notice").hidden = !text;
 }
 
-function short(addr) { return addr.length > 12 ? `${addr.slice(0, 4)}…${addr.slice(-4)}` : addr; }
-
-// Earnings and Withdrawals. A Solver withdraws all their available Earnings
-// to their own wallet, proving they own it by signing a challenge with a
-// Solana wallet such as MetaMask. Wallets are found through the Wallet
-// Standard, which MetaMask, Phantom and others implement.
-const solanaWallets = [];
-{
-  const register = (...ws) => {
-    solanaWallets.push(...ws);
-    return () => {};
-  };
-  addEventListener("wallet-standard:register-wallet", ({ detail }) => detail({ register }));
-  dispatchEvent(new CustomEvent("wallet-standard:app-ready", { detail: { register } }));
-}
-
-// solanaWallet is the wallet to sign with: MetaMask when it is installed.
-function solanaWallet() {
-  const usable = solanaWallets.filter((w) => w.features["standard:connect"] && w.features["solana:signMessage"]);
-  return usable.find((w) => /metamask/i.test(w.name)) || usable[0] || null;
-}
-
-async function walletAccount() {
-  const w = solanaWallet();
-  if (!w) throw new Error("No Solana wallet found. Install MetaMask, or on a phone open this page in MetaMask's browser.");
-  const { accounts } = await w.features["standard:connect"].connect();
-  const account = accounts.find((a) => a.chains?.some((c) => c.startsWith("solana:"))) || accounts[0];
-  if (!account) throw new Error(`${w.name} shared no Solana account.`);
-  return { w, account };
-}
-
-$("use-wallet").addEventListener("click", async () => {
-  try {
-    const { account } = await walletAccount();
-    $("wallet").value = account.address;
-    $("connect").requestSubmit();
-  } catch (err) {
-    notice(err.message);
-  }
-});
-
-let earnings = null; // { available, minimum, account_fee, withdrawals_enabled, withdrawals }
-let earningsTimer = 0;
-let withdrawing = false;
-
-const isOpen = (w) => w.state === "pending" || w.state === "sent";
-
-async function loadEarnings() {
-  clearTimeout(earningsTimer);
-  if (!wallet) return;
-  const asked = wallet;
-  try {
-    const res = await fetch(`/v1/solvers/${encodeURIComponent(asked)}/earnings`);
-    if (res.ok && asked === wallet) earnings = await res.json();
-  } catch {}
-  renderEarnings();
-  // A Withdrawal on its way is checked often; otherwise Earnings refresh slowly.
-  earningsTimer = setTimeout(loadEarnings, earnings?.withdrawals.some(isOpen) ? 2000 : 30000);
-}
-
-function renderEarnings() {
-  $("earnings").hidden = !earnings;
-  if (!earnings) return;
-  const open = earnings.withdrawals.some(isOpen);
-  const enough = earnings.available >= earnings.minimum;
-  $("earnings-available").textContent = usdc(earnings.available);
-  $("withdraw").disabled = !earnings.withdrawals_enabled || open || !enough || withdrawing;
-  let note = `Withdraws all of it to ${short(wallet)}. If that wallet has never held USDC, ` +
-    `${usdc(earnings.account_fee)} USDC is kept back to open its USDC account.`;
-  if (!earnings.withdrawals_enabled) note = "Withdrawals are not open yet.";
-  else if (open) note = "A withdrawal is on its way.";
-  else if (!enough) note = `You can withdraw once you have ${usdc(earnings.minimum)} USDC.`;
-  $("earnings-note").textContent = note;
-  $("withdrawals").replaceChildren(...earnings.withdrawals.map((w) => {
-    const li = document.createElement("li");
-    const label = {
-      pending: "preparing",
-      sent: "sending",
-      confirmed: "paid",
-      failed: `failed${w.error ? ` (${w.error})` : ""}; the Earnings are available again`,
-    }[w.state];
-    li.textContent = `${new Date(w.created_at).toLocaleString()}: ${usdc(w.payout)} USDC ${label}. `;
-    if (w.signature) {
-      const a = document.createElement("a");
-      a.href = `https://solscan.io/tx/${w.signature}`;
-      a.target = "_blank";
-      a.rel = "noopener";
-      a.textContent = "Transaction";
-      li.append(a);
-    }
-    return li;
-  }));
-}
-
-$("withdraw").addEventListener("click", async () => {
-  withdrawing = true;
-  renderEarnings();
-  try {
-    const { w, account } = await walletAccount();
-    if (account.address !== wallet) {
-      throw new Error(`${w.name} is on ${short(account.address)}, but you are connected as ${short(wallet)}. ` +
-        "Switch accounts in the wallet, or tap \"Use my MetaMask wallet\".");
-    }
-    const challenge = await postJSON("/v1/withdrawals/challenge", { wallet });
-    notice(`Sign the withdrawal message in ${w.name}.`);
-    const [signed] = await w.features["solana:signMessage"].signMessage({
-      account,
-      message: new TextEncoder().encode(challenge.message),
-    });
-    const res = await postJSON("/v1/withdrawals", { wallet, nonce: challenge.nonce, signature: base58(signed.signature) });
-    notice(`Withdrawal of ${usdc(res.payout)} USDC is on its way.`);
-  } catch (err) {
-    notice(err.message);
-  }
-  withdrawing = false;
-  loadEarnings();
-});
-
-// postJSON posts body and returns the JSON reply, or throws with a message
-// for the Solver.
-async function postJSON(path, body) {
-  const res = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-  const out = await res.json().catch(() => ({}));
-  if (res.ok) return out;
-  throw new Error({
-    below_minimum: `You need ${usdc(out.minimum + out.account_fee)} USDC to withdraw` +
-      (out.account_fee ? `: your wallet has no USDC account yet, and ${usdc(out.account_fee)} USDC opens one.` : "."),
-    withdrawal_open: "A withdrawal is already on its way.",
-    invalid_proof: "The signature did not match. Try again.",
-    withdrawals_disabled: "Withdrawals are not open yet.",
-  }[out.error] || `Withdrawal failed (${out.error || res.status}).`);
-}
-
-function base58(bytes) {
-  const alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-  let n = 0n;
-  for (const b of bytes) n = n * 256n + BigInt(b);
-  let out = "";
-  while (n > 0n) {
-    out = alphabet[Number(n % 58n)] + out;
-    n /= 58n;
-  }
-  for (const b of bytes) {
-    if (b !== 0) break;
-    out = "1" + out;
-  }
-  return out;
-}
+connect();

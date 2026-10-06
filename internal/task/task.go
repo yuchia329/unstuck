@@ -2,9 +2,7 @@
 //
 // Every transition is a conditional update that only succeeds from the
 // expected prior state, so the first outcome recorded is final and later
-// attempts are no-ops. Each transition moves money through the Ledger inside
-// the same database transaction. A Task created with payments off has no
-// Hold, and its transitions move no money.
+// attempts are no-ops.
 package task
 
 import (
@@ -16,7 +14,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/yuchia329/unstuck/internal/ledger"
 	"github.com/yuchia329/unstuck/internal/secret"
 )
 
@@ -24,41 +21,50 @@ import (
 const Schema = `
 CREATE TABLE IF NOT EXISTS tasks (
 	id                 TEXT PRIMARY KEY,
-	customer_id        TEXT NOT NULL REFERENCES customers(id),
 	page_url           TEXT NOT NULL,
 	obstacle           TEXT NOT NULL DEFAULT '',
 	state              TEXT NOT NULL CHECK (state IN ('pending', 'claimed', 'solved', 'expired', 'failed')),
 	session_token_hash TEXT NOT NULL UNIQUE,
 	created_at         INTEGER NOT NULL,
 	claim_deadline     INTEGER NOT NULL,
-	solver_wallet      TEXT,
+	solver             TEXT,
 	solve_deadline     INTEGER,
 	ended_at           INTEGER
 );
-CREATE INDEX IF NOT EXISTS tasks_customer ON tasks (customer_id, created_at);
 `
 
-// addedColumns were added to the tasks table after it was first created.
-// CREATE TABLE IF NOT EXISTS leaves an older table as it was, so Migrate adds them.
-var addedColumns = []struct{ name, decl string }{
-	{"solver_wallet", "TEXT"},
-	{"solve_deadline", "INTEGER"},
-	{"obstacle", "TEXT NOT NULL DEFAULT ''"},
-}
-
-// Migrate brings a tasks table created by an earlier version up to Schema.
+// Migrate brings a tasks table from when a Task belonged to a registered
+// Customer and its Solver was a wallet address up to Schema. CREATE TABLE IF
+// NOT EXISTS leaves such a table as it was, and its customer_id column cannot
+// be dropped in place, so the table is rebuilt. Every Task is kept; which
+// Customer it belonged to is not.
 func Migrate(db *sql.DB) error {
-	for _, c := range addedColumns {
-		var n int
-		if err := db.QueryRow(`SELECT count(*) FROM pragma_table_info('tasks') WHERE name = ?`, c.name).Scan(&n); err != nil {
+	var legacy int
+	if err := db.QueryRow(`SELECT count(*) FROM pragma_table_info('tasks') WHERE name = 'customer_id'`).Scan(&legacy); err != nil {
+		return fmt.Errorf("migrate tasks: %w", err)
+	}
+	if legacy == 0 {
+		return nil
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("migrate tasks: %w", err)
+	}
+	defer tx.Rollback()
+	for _, stmt := range []string{
+		`ALTER TABLE tasks RENAME TO tasks_legacy`,
+		Schema,
+		`INSERT INTO tasks (id, page_url, obstacle, state, session_token_hash, created_at, claim_deadline, solver, solve_deadline, ended_at)
+		 SELECT id, page_url, obstacle, state, session_token_hash, created_at, claim_deadline, solver_wallet, solve_deadline, ended_at
+		 FROM tasks_legacy`,
+		`DROP TABLE tasks_legacy`,
+	} {
+		if _, err := tx.Exec(stmt); err != nil {
 			return fmt.Errorf("migrate tasks: %w", err)
 		}
-		if n > 0 {
-			continue
-		}
-		if _, err := db.Exec(`ALTER TABLE tasks ADD COLUMN ` + c.name + ` ` + c.decl); err != nil {
-			return fmt.Errorf("migrate tasks: %w", err)
-		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("migrate tasks: %w", err)
 	}
 	return nil
 }
@@ -76,8 +82,6 @@ const (
 type Config struct {
 	ClaimWindow time.Duration
 	SolveWindow time.Duration
-	Price       int64 // USDC base units held per Task
-	Payments    bool  // off, a new Task is free: no Hold is placed
 }
 
 // Event reports a committed change to a Task. Events for a Task are
@@ -88,10 +92,9 @@ type Event struct {
 	PageURL       string
 	Obstacle      string // what the Solver is to clear, as the Agent described it; may be empty
 	CreatedAt     time.Time
-	SolverWallet  string    // set once the Task is claimed
+	Solver        string    // the claiming Solver's id, set once the Task is claimed
 	SolveDeadline time.Time // set on the Claimed Event
 	Reason        Reason    // why a Task Failed
-	Earning, Fee  int64     // the captured Hold's split, set on the Solved Event
 }
 
 // Reason says why a Task Failed.
@@ -141,11 +144,9 @@ func New(db *sql.DB, cfg Config, notify func(Event)) *Lifecycle {
 	return &Lifecycle{db: db, cfg: cfg, notify: notify, timers: map[string]*time.Timer{}}
 }
 
-// Create places a Hold of one Price and queues a new Pending Task. obstacle
-// is the Agent's description of what the Solver is to clear, or empty.
-// It returns *ledger.InsufficientError when available Balance is below the Price.
-// With payments off it places no Hold, so the Balance does not matter.
-func (l *Lifecycle) Create(ctx context.Context, customerID, pageURL, obstacle string) (Created, error) {
+// Create queues a new Pending Task. obstacle is the Agent's description of
+// what the Solver is to clear, or empty.
+func (l *Lifecycle) Create(ctx context.Context, pageURL, obstacle string) (Created, error) {
 	now := time.Now()
 	c := Created{
 		ID:            secret.New("tsk_"),
@@ -153,18 +154,13 @@ func (l *Lifecycle) Create(ctx context.Context, customerID, pageURL, obstacle st
 		ClaimDeadline: now.Add(l.cfg.ClaimWindow),
 	}
 	_, err := l.commit(ctx, func(tx *sql.Tx) (*Event, error) {
-		// Insert first: the Hold references the Task id.
 		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO tasks (id, customer_id, page_url, obstacle, state, session_token_hash, created_at, claim_deadline)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-			c.ID, customerID, pageURL, obstacle, Pending, secret.Hash(c.SessionToken), now.UnixMilli(), c.ClaimDeadline.UnixMilli()); err != nil {
+			`INSERT INTO tasks (id, page_url, obstacle, state, session_token_hash, created_at, claim_deadline)
+			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			c.ID, pageURL, obstacle, Pending, secret.Hash(c.SessionToken), now.UnixMilli(), c.ClaimDeadline.UnixMilli()); err != nil {
 			return nil, fmt.Errorf("insert task: %w", err)
 		}
-		e := &Event{TaskID: c.ID, State: Pending, PageURL: pageURL, Obstacle: obstacle, CreatedAt: now}
-		if !l.cfg.Payments {
-			return e, nil
-		}
-		return e, ledger.Hold(ctx, tx, customerID, c.ID, l.cfg.Price)
+		return &Event{TaskID: c.ID, State: Pending, PageURL: pageURL, Obstacle: obstacle, CreatedAt: now}, nil
 	})
 	if err != nil {
 		return Created{}, err
@@ -173,24 +169,24 @@ func (l *Lifecycle) Create(ctx context.Context, customerID, pageURL, obstacle st
 	return c, nil
 }
 
-// Claim gives a Pending Task to the Solver with wallet and starts its solve
+// Claim gives a Pending Task to solver and starts its solve
 // window. Only the first Claim succeeds; a Task is never requeued, so any
 // later Claim returns ErrAlreadyClaimed. A Solver holds at most one Claim at
 // a time: until their claimed Task ends, Claim returns ErrHoldingClaim.
-func (l *Lifecycle) Claim(ctx context.Context, id, wallet string) (solveDeadline time.Time, err error) {
+func (l *Lifecycle) Claim(ctx context.Context, id, solver string) (solveDeadline time.Time, err error) {
 	won, err := l.commit(ctx, func(tx *sql.Tx) (*Event, error) {
 		// Measured from the moment the Claim is recorded.
 		now := time.Now()
 		solveDeadline = now.Add(l.cfg.SolveWindow)
-		e := &Event{TaskID: id, State: Claimed, SolverWallet: wallet, SolveDeadline: solveDeadline}
+		e := &Event{TaskID: id, State: Claimed, Solver: solver, SolveDeadline: solveDeadline}
 		var created int64
 		// The claim deadline is checked here too, in case the Expire timer runs late.
 		err := tx.QueryRowContext(ctx,
-			`UPDATE tasks SET state = ?1, solver_wallet = ?2, solve_deadline = ?3
+			`UPDATE tasks SET state = ?1, solver = ?2, solve_deadline = ?3
 			 WHERE id = ?4 AND state = ?5 AND claim_deadline > ?6
-			   AND NOT EXISTS (SELECT 1 FROM tasks WHERE solver_wallet = ?2 AND state = ?1)
+			   AND NOT EXISTS (SELECT 1 FROM tasks WHERE solver = ?2 AND state = ?1)
 			 RETURNING page_url, created_at`,
-			Claimed, wallet, solveDeadline.UnixMilli(), id, Pending, now.UnixMilli()).Scan(&e.PageURL, &created)
+			Claimed, solver, solveDeadline.UnixMilli(), id, Pending, now.UnixMilli()).Scan(&e.PageURL, &created)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, claimRefusal(ctx, tx, id, now)
 		}
@@ -229,61 +225,42 @@ func claimRefusal(ctx context.Context, tx *sql.Tx, id string, now time.Time) err
 
 // failOverdue Fails a claimed Task whose solve window has passed.
 func (l *Lifecycle) failOverdue(ctx context.Context, id string) (bool, error) {
-	return l.transition(ctx, id, Claimed, Failed, SolveWindowPassed, "", release(ctx))
+	return l.transition(ctx, id, Claimed, Failed, SolveWindowPassed, "")
 }
 
-// GiveUp Fails a Task at once for the Solver holding its Claim and releases
-// its Hold. It returns ErrNotYourClaim if wallet does not hold a live Claim.
-func (l *Lifecycle) GiveUp(ctx context.Context, id, wallet string) error {
-	won, err := l.transition(ctx, id, Claimed, Failed, GaveUp, wallet, release(ctx))
+// GiveUp Fails a Task at once for the Solver holding its Claim. It returns
+// ErrNotYourClaim if solver does not hold a live Claim.
+func (l *Lifecycle) GiveUp(ctx context.Context, id, solver string) error {
+	won, err := l.transition(ctx, id, Claimed, Failed, GaveUp, solver)
 	if err == nil && !won {
 		return ErrNotYourClaim
 	}
 	return err
 }
 
-// Expire moves a Pending Task to Expired and releases its Hold.
+// Expire moves a Pending Task to Expired.
 // It reports whether this call recorded the outcome.
 func (l *Lifecycle) Expire(ctx context.Context, id string) (bool, error) {
-	return l.transition(ctx, id, Pending, Expired, "", "", release(ctx))
+	return l.transition(ctx, id, Pending, Expired, "", "")
 }
 
-// Solve records that the Bridge's cleared check passed on a claimed Task and
-// captures its Hold, split into the Solver's Earning and the Fee. It reports
-// whether this call recorded the outcome: a Task that already ended, or was
-// never claimed, is left as it is.
+// Solve records that the Bridge's cleared check passed on a claimed Task. It
+// reports whether this call recorded the outcome: a Task that already ended,
+// or was never claimed, is left as it is.
 func (l *Lifecycle) Solve(ctx context.Context, id string) (bool, error) {
-	return l.transition(ctx, id, Claimed, Solved, "", "", func(tx *sql.Tx, e *Event) error {
-		var err error
-		e.Earning, e.Fee, err = ledger.Capture(ctx, tx, id, e.SolverWallet)
-		return unheld(err)
-	})
+	return l.transition(ctx, id, Claimed, Solved, "", "")
 }
 
-// BridgeLost Fails a Pending or claimed Task whose Bridge disconnected and
-// releases its Hold, so no Solver claims or keeps working on a dead Session.
+// BridgeLost Fails a Pending or claimed Task whose Bridge disconnected, so no
+// Solver claims or keeps working on a dead Session.
 func (l *Lifecycle) BridgeLost(ctx context.Context, id string) (bool, error) {
 	// Pending first: a Task never returns to Pending, so if it was claimed
 	// in between, the second attempt still sees it.
-	won, err := l.transition(ctx, id, Pending, Failed, BridgeDisconnected, "", release(ctx))
+	won, err := l.transition(ctx, id, Pending, Failed, BridgeDisconnected, "")
 	if err != nil || won {
 		return won, err
 	}
-	return l.transition(ctx, id, Claimed, Failed, BridgeDisconnected, "", release(ctx))
-}
-
-// release returns an ended Task's Hold to the Customer in full.
-func release(ctx context.Context) func(*sql.Tx, *Event) error {
-	return func(tx *sql.Tx, e *Event) error { return unheld(ledger.Release(ctx, tx, e.TaskID)) }
-}
-
-// unheld drops the error for a Task that has no Hold. A Task created with
-// payments off has none, so ending it moves no money.
-func unheld(err error) error {
-	if errors.Is(err, ledger.ErrNoHold) {
-		return nil
-	}
-	return err
+	return l.transition(ctx, id, Claimed, Failed, BridgeDisconnected, "")
 }
 
 // Resume re-arms timers after a restart, ending overdue Tasks at once, and
@@ -338,7 +315,7 @@ func (l *Lifecycle) Session(ctx context.Context, id, token string) (Event, error
 	var solver sql.NullString
 	var solveDeadline sql.NullInt64
 	err := l.db.QueryRowContext(ctx,
-		`SELECT state, page_url, created_at, solver_wallet, solve_deadline FROM tasks WHERE id = ? AND session_token_hash = ?`,
+		`SELECT state, page_url, created_at, solver, solve_deadline FROM tasks WHERE id = ? AND session_token_hash = ?`,
 		id, secret.Hash(token)).Scan(&e.State, &e.PageURL, &created, &solver, &solveDeadline)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Event{}, ErrBadToken
@@ -347,23 +324,23 @@ func (l *Lifecycle) Session(ctx context.Context, id, token string) (Event, error
 		return Event{}, fmt.Errorf("session: %w", err)
 	}
 	e.CreatedAt = time.UnixMilli(created)
-	e.SolverWallet = solver.String
+	e.Solver = solver.String
 	if solveDeadline.Valid {
 		e.SolveDeadline = time.UnixMilli(solveDeadline.Int64)
 	}
 	return e, nil
 }
 
-// ClaimOf returns the Task whose live Claim wallet holds, as a Claimed Event,
+// ClaimOf returns the Task whose live Claim solver holds, as a Claimed Event,
 // so a Solver who reconnects can resume its Session. ok is false if the
 // Solver holds no Claim or its solve window has passed.
-func (l *Lifecycle) ClaimOf(ctx context.Context, wallet string) (e Event, ok bool, err error) {
-	e = Event{State: Claimed, SolverWallet: wallet}
+func (l *Lifecycle) ClaimOf(ctx context.Context, solver string) (e Event, ok bool, err error) {
+	e = Event{State: Claimed, Solver: solver}
 	var created, solveDeadline int64
 	err = l.db.QueryRowContext(ctx,
 		`SELECT id, page_url, obstacle, created_at, solve_deadline FROM tasks
-		 WHERE solver_wallet = ? AND state = ? AND solve_deadline > ?`,
-		wallet, Claimed, time.Now().UnixMilli()).Scan(&e.TaskID, &e.PageURL, &e.Obstacle, &created, &solveDeadline)
+		 WHERE solver = ? AND state = ? AND solve_deadline > ?`,
+		solver, Claimed, time.Now().UnixMilli()).Scan(&e.TaskID, &e.PageURL, &e.Obstacle, &created, &solveDeadline)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Event{}, false, nil
 	}
@@ -373,36 +350,6 @@ func (l *Lifecycle) ClaimOf(ctx context.Context, wallet string) (e Event, ok boo
 	e.CreatedAt = time.UnixMilli(created)
 	e.SolveDeadline = time.UnixMilli(solveDeadline)
 	return e, true, nil
-}
-
-// Summary is a Task as shown in a Customer's history.
-type Summary struct {
-	ID        string
-	PageURL   string
-	State     State
-	CreatedAt time.Time
-}
-
-// Recent lists a Customer's most recent Tasks, newest first.
-func (l *Lifecycle) Recent(ctx context.Context, customerID string, limit int) ([]Summary, error) {
-	rows, err := l.db.QueryContext(ctx,
-		`SELECT id, page_url, state, created_at FROM tasks WHERE customer_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?`,
-		customerID, limit)
-	if err != nil {
-		return nil, fmt.Errorf("recent tasks: %w", err)
-	}
-	defer rows.Close()
-	out := []Summary{}
-	for rows.Next() {
-		var s Summary
-		var created int64
-		if err := rows.Scan(&s.ID, &s.PageURL, &s.State, &created); err != nil {
-			return nil, fmt.Errorf("recent tasks: %w", err)
-		}
-		s.CreatedAt = time.UnixMilli(created)
-		out = append(out, s)
-	}
-	return out, rows.Err()
 }
 
 // Close stops all timers and waits for any running transition to finish.
@@ -418,16 +365,15 @@ func (l *Lifecycle) Close() {
 }
 
 // transition moves a Task from one state to another only if it is still in
-// `from` (and, when solver is set, claimed by solver), running money in the
-// same transaction. money may add to the Event. It reports whether it won.
-func (l *Lifecycle) transition(ctx context.Context, id string, from, to State, reason Reason, solver string, money func(*sql.Tx, *Event) error) (bool, error) {
+// `from` (and, when solver is set, claimed by solver). It reports whether it won.
+func (l *Lifecycle) transition(ctx context.Context, id string, from, to State, reason Reason, solver string) (bool, error) {
 	return l.commit(ctx, func(tx *sql.Tx) (*Event, error) {
 		e := &Event{TaskID: id, State: to, Reason: reason}
 		var created int64
 		var claimant sql.NullString
 		err := tx.QueryRowContext(ctx,
-			`UPDATE tasks SET state = ?1, ended_at = ?2 WHERE id = ?3 AND state = ?4 AND (?5 = '' OR solver_wallet = ?5)
-			 RETURNING page_url, created_at, solver_wallet`,
+			`UPDATE tasks SET state = ?1, ended_at = ?2 WHERE id = ?3 AND state = ?4 AND (?5 = '' OR solver = ?5)
+			 RETURNING page_url, created_at, solver`,
 			to, time.Now().UnixMilli(), id, from, solver).Scan(&e.PageURL, &created, &claimant)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil // another outcome was recorded first
@@ -436,8 +382,8 @@ func (l *Lifecycle) transition(ctx context.Context, id string, from, to State, r
 			return nil, fmt.Errorf("transition %s -> %s: %w", from, to, err)
 		}
 		e.CreatedAt = time.UnixMilli(created)
-		e.SolverWallet = claimant.String
-		return e, money(tx, e)
+		e.Solver = claimant.String
+		return e, nil
 	})
 }
 

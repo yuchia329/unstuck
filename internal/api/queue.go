@@ -6,6 +6,7 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 	"unicode"
@@ -16,18 +17,22 @@ import (
 
 	"github.com/yuchia329/unstuck/internal/queue"
 	"github.com/yuchia329/unstuck/internal/session"
-	"github.com/yuchia329/unstuck/internal/solana"
 	"github.com/yuchia329/unstuck/internal/task"
 )
 
 const queueWriteTimeout = 5 * time.Second
 
-// handleQueue serves a Solver's Queue socket. The Solver identifies with a
-// wallet address only; there is no other authentication.
+// solverID is the shape of a Solver's id: long enough that nobody guesses
+// another Solver's.
+var solverID = regexp.MustCompile(`^[A-Za-z0-9_-]{16,64}$`)
+
+// handleQueue serves a Solver's Queue socket. There is no sign-in: the Solver
+// names itself with an id its Queue page made up and keeps. Whoever presents
+// the id is that Solver, and resumes its Claim.
 func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
-	wallet := r.URL.Query().Get("wallet")
-	if !solana.IsPubkey(wallet) {
-		writeError(w, http.StatusBadRequest, "invalid_wallet")
+	solver := r.URL.Query().Get("solver")
+	if !solverID.MatchString(solver) {
+		writeError(w, http.StatusBadRequest, "invalid_solver")
 		return
 	}
 	conn, err := websocket.Accept(w, r, nil)
@@ -39,19 +44,19 @@ func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	go func() {
 		defer cancel()
-		s.readSolver(ctx, conn, wallet)
+		s.readSolver(ctx, conn, solver)
 	}()
 	go keepAlive(ctx, conn, s.cfg.PingInterval)
 
-	sub, snapshot := s.queue.Subscribe(wallet)
+	sub, snapshot := s.queue.Subscribe(solver)
 	defer s.queue.Unsubscribe(sub)
-	viewer := s.relay.Watch(wallet)
+	viewer := s.relay.Watch(solver)
 	defer s.relay.Unwatch(viewer)
 	// A Solver reconnecting mid-Session resumes it. The Claim is looked up
 	// after subscribing, so if the Task ends meanwhile its outcome follows.
-	resume, ok, err := s.tasks.ClaimOf(ctx, wallet)
+	resume, ok, err := s.tasks.ClaimOf(ctx, solver)
 	if err != nil {
-		log.Printf("claim of %s: %v", wallet, err)
+		log.Printf("claim of solver: %v", err)
 	}
 	if ok && !writeMsg(ctx, conn, map[string]any{
 		"type":          "claimed",
@@ -99,7 +104,7 @@ func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
 }
 
 // readSolver handles what the Solver sends until the socket closes.
-func (s *Server) readSolver(ctx context.Context, conn *websocket.Conn, wallet string) {
+func (s *Server) readSolver(ctx context.Context, conn *websocket.Conn, solver string) {
 	for {
 		var msg struct {
 			Type   string  `json:"type"`
@@ -120,15 +125,15 @@ func (s *Server) readSolver(ctx context.Context, conn *websocket.Conn, wallet st
 		var reply map[string]any
 		switch msg.Type {
 		case "claim":
-			reply = s.claim(ctx, msg.TaskID, wallet)
+			reply = s.claim(ctx, msg.TaskID, solver)
 		case "give_up":
-			reply = s.giveUp(ctx, msg.TaskID, wallet)
+			reply = s.giveUp(ctx, msg.TaskID, solver)
 		case "rtc_offer":
-			reply = s.offer(msg.TaskID, wallet, msg.SDP)
+			reply = s.offer(msg.TaskID, solver, msg.SDP)
 		case "done":
-			reply = s.done(msg.TaskID, wallet)
+			reply = s.done(msg.TaskID, solver)
 		case "pointer", "wheel", "text", "key":
-			reply = s.input(msg.TaskID, wallet, session.Input{
+			reply = s.input(msg.TaskID, solver, session.Input{
 				Type: msg.Type, Action: msg.Action, X: msg.X, Y: msg.Y, DX: msg.DX, DY: msg.DY,
 				Text: msg.Text, Key: msg.Key, T: msg.T,
 			})
@@ -141,8 +146,8 @@ func (s *Server) readSolver(ctx context.Context, conn *websocket.Conn, wallet st
 	}
 }
 
-func (s *Server) claim(ctx context.Context, taskID, wallet string) map[string]any {
-	solveDeadline, err := s.tasks.Claim(ctx, taskID, wallet)
+func (s *Server) claim(ctx context.Context, taskID, solver string) map[string]any {
+	solveDeadline, err := s.tasks.Claim(ctx, taskID, solver)
 	refused := func(code string) map[string]any {
 		return map[string]any{"type": "claim_failed", "task_id": taskID, "error": code}
 	}
@@ -169,8 +174,8 @@ func (s *Server) claim(ctx context.Context, taskID, wallet string) map[string]an
 }
 
 // giveUp replies only on refusal; success arrives as task_failed.
-func (s *Server) giveUp(ctx context.Context, taskID, wallet string) map[string]any {
-	err := s.tasks.GiveUp(ctx, taskID, wallet)
+func (s *Server) giveUp(ctx context.Context, taskID, solver string) map[string]any {
+	err := s.tasks.GiveUp(ctx, taskID, solver)
 	switch {
 	case errors.Is(err, task.ErrNotYourClaim):
 		return map[string]any{"type": "error", "task_id": taskID, "error": "not_your_claim"}
@@ -203,7 +208,7 @@ func validText(t string) bool {
 }
 
 // input forwards a Solver's input event to the Bridge. It replies only on refusal.
-func (s *Server) input(taskID, wallet string, in session.Input) map[string]any {
+func (s *Server) input(taskID, solver string, in session.Input) map[string]any {
 	inFrame := func(v float64) bool { return v >= 0 && v <= 1 }
 	var valid bool
 	switch in.Type {
@@ -219,7 +224,7 @@ func (s *Server) input(taskID, wallet string, in session.Input) map[string]any {
 	if !valid {
 		return map[string]any{"type": "error", "task_id": taskID, "error": "invalid_input"}
 	}
-	err := s.relay.Input(taskID, wallet, in)
+	err := s.relay.Input(taskID, solver, in)
 	if errors.Is(err, task.ErrNotYourClaim) {
 		return map[string]any{"type": "error", "task_id": taskID, "error": "not_your_claim"}
 	}
@@ -228,11 +233,11 @@ func (s *Server) input(taskID, wallet string, in session.Input) map[string]any {
 
 // offer forwards the Solver's WebRTC offer to the Bridge. It replies only on
 // refusal; the Bridge's answer arrives as rtc_answer.
-func (s *Server) offer(taskID, wallet, sdp string) map[string]any {
+func (s *Server) offer(taskID, solver, sdp string) map[string]any {
 	if sdp == "" || len(sdp) > maxSDP {
 		return map[string]any{"type": "error", "task_id": taskID, "error": "invalid_offer"}
 	}
-	if errors.Is(s.relay.Offer(taskID, wallet, sdp), task.ErrNotYourClaim) {
+	if errors.Is(s.relay.Offer(taskID, solver, sdp), task.ErrNotYourClaim) {
 		return map[string]any{"type": "error", "task_id": taskID, "error": "not_your_claim"}
 	}
 	return nil // forwarded, or dropped because no Bridge is connected
@@ -241,8 +246,8 @@ func (s *Server) offer(taskID, wallet, sdp string) map[string]any {
 // done tells the Bridge the Solver reports the obstacle cleared, so the
 // Agent can check. It replies only on refusal; the outcome arrives as
 // task_solved, or as not_cleared with the Solver keeping the page.
-func (s *Server) done(taskID, wallet string) map[string]any {
-	if errors.Is(s.relay.Done(taskID, wallet), task.ErrNotYourClaim) {
+func (s *Server) done(taskID, solver string) map[string]any {
+	if errors.Is(s.relay.Done(taskID, solver), task.ErrNotYourClaim) {
 		return map[string]any{"type": "error", "task_id": taskID, "error": "not_your_claim"}
 	}
 	return nil // forwarded, or dropped because no Bridge is connected
@@ -256,8 +261,8 @@ func queueMessage(m queue.Message) map[string]any {
 		return map[string]any{"type": "task_removed", "task_id": m.Removed}
 	case m.Failed != nil:
 		return map[string]any{"type": "task_failed", "task_id": m.Failed.TaskID, "reason": m.Failed.Reason}
-	case m.Solved != nil:
-		return map[string]any{"type": "task_solved", "task_id": m.Solved.TaskID, "earning": m.Solved.Earning, "fee": m.Solved.Fee}
+	case m.Solved != "":
+		return map[string]any{"type": "task_solved", "task_id": m.Solved}
 	}
 	return nil
 }

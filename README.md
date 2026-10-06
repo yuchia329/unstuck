@@ -5,12 +5,10 @@
 An Agent's browser hits a Challenge it cannot pass, such as a reCAPTCHA or a
 slider puzzle. The Agent calls `solve(page)`. A human Solver claims the job
 on the Queue page, controls the Agent's browser remotely from a phone or
-desktop, and clears the Challenge. The Agent then carries on. The Customer
-pays 0.01 USDC per solved Task from a prepaid Balance on Solana.
+desktop, and clears the Challenge. The Agent then carries on.
 
-Payments are off by default: Tasks are free, nothing touches Solana, and an
-Agent needs only a wallet address, no API key. See
-[Payments off](#payments-off).
+Nobody signs in and nothing is paid: an Agent needs no key, and a Solver
+only opens the Queue page. See [No sign-in](#no-sign-in).
 
 **Unstuck is a demo that you run yourself.** You start the backend, run one
 of the demo Agents, and play the Solver on your phone. The Bridge is not an
@@ -27,13 +25,13 @@ await solve(page); // returns once a human has cleared the Challenge
 await page.click("#submit");
 ```
 
-Terms like Task, Hold and Session have exact meanings here. See
+Terms like Task, Claim and Session have exact meanings here. See
 [CONTEXT.md](CONTEXT.md) for the glossary.
 
 ## Contents
 
 - [How it works](#how-it-works)
-- [Payments off](#payments-off)
+- [No sign-in](#no-sign-in)
 - [System architecture](#system-architecture)
 - [The Bridge and the demo Agents](#the-bridge-and-the-demo-agents)
 - [Repository layout](#repository-layout)
@@ -49,9 +47,9 @@ Terms like Task, Hold and Session have exact meanings here. See
 
 | Who          | What they do                                                    | How they talk to Unstuck                    |
 | ------------ | --------------------------------------------------------------- | ------------------------------------------- |
-| **Customer** | Owns the Agent. Registers a Solana wallet and prepays USDC.     | API key (`unstuck_...`), or the wallet address alone with payments off |
+| **Customer** | Owns the Agent.                                                 | Not at all: no account and no key           |
 | **Agent**    | The Customer's Playwright program. Imports the Bridge.          | `solve(page)` from the Bridge               |
-| **Solver**   | A human who clears Challenges and earns USDC.                   | Queue page in a browser, identified by wallet |
+| **Solver**   | A human who clears Challenges.                                  | Queue page in a browser, with no sign-in    |
 
 ### One Task, start to finish
 
@@ -62,8 +60,7 @@ sequenceDiagram
     participant B as Unstuck backend
     participant S as Solver (Queue page)
 
-    A->>B: POST /v1/tasks (API key)
-    B->>B: Hold 0.01 USDC from the Balance
+    A->>B: POST /v1/tasks
     B-->>A: task_id + session_token
     A->>B: open Bridge WebSocket
     B-->>S: task_added (live Queue)
@@ -76,17 +73,13 @@ sequenceDiagram
     end
     A->>A: cleared check passes
     A->>B: solved
-    B->>B: capture Hold: 0.008 Earning, 0.002 Fee
     B-->>A: solved, so solve(page) returns
-    B-->>S: task_solved + Earning
+    B-->>S: task_solved
 ```
 
 In words:
 
-1. **Create.** The Agent calls `solve(page)`. The Bridge creates a Task, and
-   the backend puts a Hold of one Price on the Customer's Balance. If the
-   available Balance is too low, the backend returns 402 and the Bridge
-   throws `InsufficientBalanceError`.
+1. **Create.** The Agent calls `solve(page)` and the Bridge creates a Task.
 2. **Queue.** Every connected Solver sees the Task appear live.
 3. **Claim.** The first Solver to tap **Claim** gets it. A Task is claimed at
    most once and is never requeued.
@@ -101,8 +94,8 @@ In words:
    **Done**: the Agent takes the page back and runs its verify check (the
    cleared check unless it passes its own). If the Challenge is still there,
    the Solver is told so and keeps the page. Once either check passes, the
-   Agent has the page for good, the Bridge reports Solved, the Hold is
-   captured and `solve(page)` returns.
+   Agent has the page for good, the Bridge reports Solved and `solve(page)`
+   returns.
 
 ### How a Task can end
 
@@ -111,84 +104,36 @@ wins.
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Queued: POST /v1/tasks (Hold placed)
+    [*] --> Queued: POST /v1/tasks
     Queued --> Claimed: Solver claims
     Queued --> Expired: claim window passes
     Queued --> Failed: Bridge disconnects
     Claimed --> Solved: cleared check passes / verify check passes after Done
     Claimed --> Failed: solve window passes / Solver gives up / Bridge disconnects
-    Solved --> [*]: Hold captured (80% Earning, 20% Fee)
-    Expired --> [*]: Hold released
-    Failed --> [*]: Hold released
+    Solved --> [*]
+    Expired --> [*]
+    Failed --> [*]
 ```
 
-| Outcome     | Bridge throws         | Money                        |
-| ----------- | --------------------- | ---------------------------- |
-| **Solved**  | nothing, it returns   | Hold captured                |
-| **Expired** | `TaskExpiredError`    | Hold released to the Customer |
-| **Failed**  | `TaskFailedError`     | Hold released to the Customer |
+| Outcome     | Bridge throws         |
+| ----------- | --------------------- |
+| **Solved**  | nothing, it returns   |
+| **Expired** | `TaskExpiredError`    |
+| **Failed**  | `TaskFailedError`     |
 
-### Money flow
+## No sign-in
 
-```mermaid
-flowchart LR
-    W[Customer wallet] -- "USDC on Solana mainnet" --> SW[Service wallet]
-    SW -. "backend polls every 5s" .-> BAL[Customer Balance<br/>available + held]
-    BAL -- "Task created" --> H[Hold: 0.01 USDC]
-    H -- Solved --> E[Solver Earning 0.008]
-    H -- Solved --> F[Unstuck Fee 0.002]
-    H -- "Expired / Failed" --> BAL
-    E -- "Withdrawal (Solver signs in MetaMask)" --> HW[Hot wallet]
-    HW -- "USDC on Solana" --> SOL[Solver wallet]
-```
+Unstuck has no accounts, no API keys, no wallets and no payments.
 
-- **Deposit.** The Customer sends USDC from their registered wallet to the
-  service wallet. The backend watches the service wallet's USDC token account
-  and credits the sender's Balance. Deposits are deduplicated by transaction
-  signature.
-- **Unattributed Deposit.** USDC from a wallet nobody has registered is kept
-  and credited once that wallet registers.
-- **Registration.** The Customer proves wallet ownership by signing a
-  single-use challenge (ed25519). Registering again issues a new API key and
-  revokes the old one.
-- **Withdrawal.** The Queue page shows the Solver's available Earnings. The
-  Solver taps Withdraw and signs a single-use withdrawal challenge in
-  MetaMask (any Solana wallet works), and the backend sends all of it, in
-  one transaction, from a hot wallet it holds to that same wallet. The
-  minimum is 0.10 USDC. If the wallet has never held USDC, the transaction
-  also opens its USDC account, and 0.40 USDC is kept back for that account's
-  rent, which the hot wallet pays in SOL.
-- **Hot wallet.** A separate wallet whose key the backend holds, so keep
-  only a small float in it. Top it up with USDC from the service wallet and
-  with a little SOL for fees. Without `-payout-keypair` Withdrawals are off.
-- A Withdrawal is never paid twice. Its signature is recorded before it is
-  sent, and it fails only when the transaction failed on chain or can no
-  longer land. A failed Withdrawal's Earnings are available again.
-
-## Payments off
-
-The backend charges nothing unless it is started with `-payments`. The
-sections above describe a backend with payments on. With payments off:
-
-- **No Hold.** `POST /v1/tasks` never returns 402. A Solved Task earns the
-  Solver nothing and no Fee is taken.
-- **Nothing touches Solana.** The Deposit poller does not run and
-  Withdrawals answer `503 withdrawals_disabled`, whatever `-rpc-url` and
-  `-payout-keypair` say. Balances and Earnings already in the database stay
-  as they are.
-- **No API key needed.** An Agent may name its Customer by Solana wallet
-  address alone: set `UNSTUCK_WALLET`, or pass `solve(page, { wallet })`.
-  The backend creates the Customer the first time it sees the wallet. The
-  wallet stays the Customer's identity, so Deposits and an API key can
-  follow later by registering it.
-- **Nothing proves the wallet.** Anyone can create Tasks under any wallet
-  address. They can see nothing of that Customer: `GET /v1/balance`, which
-  lists a Customer's Tasks, still needs the API key. An API key still works
-  for creating Tasks too.
-
-A Task keeps the terms it was created under. One with a Hold is captured or
-released as usual after a restart with payments off, and one without a Hold
-ends without moving money after a restart with payments on.
+- **An Agent needs nothing.** `POST /v1/tasks` takes no key, so anyone who
+  can reach the backend can create Tasks.
+- **A Solver needs nothing.** On a first visit the Queue page makes up a
+  random id and keeps it in the browser's local storage. A reload or a
+  second tab is the same Solver and resumes its Claim. Another browser or
+  device is another Solver.
+- **The id is the Solver.** Whoever presents it holds its Claim, so it is
+  32 random hex characters and the page never shows it.
+- **Nothing is charged and nobody is paid.**
 
 ## System architecture
 
@@ -206,34 +151,23 @@ flowchart TB
         API[HTTP API<br/>internal/api]
         Q[Queue + Claim<br/>internal/queue]
         SE[Session relay<br/>internal/session]
-        LE[Ledger: Balance, Holds<br/>internal/ledger]
-        DE[Deposit poller<br/>internal/deposit]
-        PO[Withdrawals<br/>internal/payout]
+        TA[Task lifecycle<br/>internal/task]
         DB[(SQLite<br/>unstuck.db)]
         WEB[Queue page<br/>internal/web/static]
-        API --- Q & SE & LE & PO
-        LE --- DB
-        DE --> LE
-        PO --> LE
+        API --- Q & SE & TA
+        TA --- DB
     end
 
     subgraph Solver device
         QP[Queue page<br/>phone or desktop browser]
     end
 
-    SOL[(Solana mainnet<br/>JSON-RPC)]
-
     BR -- "REST: create Task" --> API
     BR <-- "Bridge WebSocket:<br/>lifecycle + relayed frames/input" --> SE
     QP <-- "Queue WebSocket:<br/>tasks, claim, relayed frames/input" --> Q
     WEB -- "serves" --> QP
-    DE -- "getSignaturesForAddress" --> SOL
-    PO -- "USDC transfer" --> SOL
     BR <-. "WebRTC data channel (direct):<br/>frames + input" .-> QP
 ```
-
-With payments off, the default, the Ledger moves no money, the Deposit
-poller and Withdrawals are off, and nothing reaches Solana.
 
 ### Components
 
@@ -244,11 +178,8 @@ poller and Withdrawals are off, and nothing reaches Solana.
 | **HTTP API**       | [internal/api/](internal/api/)   | REST endpoints plus the Bridge and Queue WebSockets.                                   |
 | **Queue**          | [internal/queue/](internal/queue/) | Live list of unclaimed Tasks. First Claim wins, one Claim per Solver at a time.       |
 | **Session**        | [internal/session/](internal/session/) | Pairs one Bridge with its Solver. Relays frames and input, and keeps the Session alive across a Solver reconnect. |
-| **Ledger**         | [internal/ledger/](internal/ledger/) | Balances, Holds, capture and release.                                               |
-| **Deposit poller** | [internal/deposit/](internal/deposit/) | Polls Solana for USDC sent to the service wallet and credits Balances.          |
-| **Withdrawals**    | [internal/payout/](internal/payout/) | Pays a Solver's Earnings in USDC from the hot wallet.                             |
-| **Queue page**     | [internal/web/static/](internal/web/static/) | Solver UI: connect a wallet, claim, see the page, send taps and drags.     |
-| **Register CLI**   | [cmd/unstuck-register/](cmd/unstuck-register/) | Signs the registration challenge with a Solana keypair file and prints the API key. |
+| **Task lifecycle** | [internal/task/](internal/task/) | Task state and its transitions, with the claim and solve timers.                     |
+| **Queue page**     | [internal/web/static/](internal/web/static/) | Solver UI: claim, see the page, send taps and drags.                       |
 
 ### Two ways frames travel
 
@@ -272,21 +203,12 @@ dependency. Without it, Sessions stay relayed.
 
 ### HTTP API
 
-| Method + path                    | Auth        | Purpose                                     |
-| -------------------------------- | ----------- | ------------------------------------------- |
-| `POST /v1/customers/challenge`   | none        | Get a registration challenge to sign        |
-| `POST /v1/customers`             | signature   | Register a wallet and get an API key         |
-| `GET /v1/balance`                | API key     | Available and held Balance                   |
-| `POST /v1/tasks`                 | API key, or `wallet` in the body with payments off | Create a Task (402 if Balance is too low) |
-| `GET /v1/tasks/{id}/bridge`      | session token | Bridge WebSocket                           |
-| `GET /v1/queue?wallet=...`       | none        | Solver Queue WebSocket                       |
-| `GET /v1/solvers/{wallet}/earnings` | none     | Available Earnings and recent Withdrawals    |
-| `POST /v1/withdrawals/challenge` | none        | Get a withdrawal challenge to sign           |
-| `POST /v1/withdrawals`           | signature   | Withdraw all available Earnings to the wallet |
-| `POST /v1/dev/credit`            | API key     | Free credit, only with `-dev`                |
-| `GET /`                          | none        | Queue page                                   |
-
-Amounts are USDC base units: 1 USDC = 1,000,000.
+| Method + path                    | Auth          | Purpose                |
+| -------------------------------- | ------------- | ---------------------- |
+| `POST /v1/tasks`                 | none          | Create a Task          |
+| `GET /v1/tasks/{id}/bridge`      | session token | Bridge WebSocket       |
+| `GET /v1/queue?solver=...`       | Solver id     | Solver Queue WebSocket |
+| `GET /`                          | none          | Queue page             |
 
 ## The Bridge and the demo Agents
 
@@ -299,8 +221,7 @@ does.
 
 ### Demo Agents
 
-Run these from `bridge/`. Each one needs `UNSTUCK_WALLET`, or
-`UNSTUCK_API_KEY` with payments on.
+Run these from `bridge/`.
 
 | Command                  | Agent                                             | What it does                                                                 | Also needs                              |
 | ------------------------ | ------------------------------------------------- | ---------------------------------------------------------------------------- | --------------------------------------- |
@@ -330,7 +251,7 @@ await browser.close();
 
 ```sh
 cd bridge
-UNSTUCK_WALLET=<any Solana wallet address> npx tsx demo/my-agent.ts
+npx tsx demo/my-agent.ts
 ```
 
 - **Chromium only.** The Bridge streams the page with a CDP screencast, so
@@ -346,8 +267,7 @@ UNSTUCK_WALLET=<any Solana wallet address> npx tsx demo/my-agent.ts
 
 ```
 cmd/unstuck/            Go backend entry point
-cmd/unstuck-register/   CLI that registers a Customer with a keypair file
-internal/                Backend packages (api, queue, session, ledger, deposit, payout, ...)
+internal/                Backend packages (api, queue, session, task, ...)
 internal/web/static/     Queue page (plain HTML + JS)
 bridge/src/              Bridge (TypeScript source, imported by path)
 bridge/demo/             Demo Agents: fake Challenge, real reCAPTCHA, Stagehand, Jev
@@ -366,9 +286,6 @@ Run every command from the repo root unless the step says otherwise.
 
 - Go 1.26+ and Node 22+
 - ngrok with an authtoken (`ngrok config add-authtoken <token>`)
-- Only with payments on: [pay.sh CLI](https://pay.sh) with a funded
-  **local** account. A remote-custody account will not work, because the
-  keypair must be exportable.
 - Bridge dependencies:
 
   ```sh
@@ -383,79 +300,16 @@ If an old server is still on port 8080, stop it first:
 lsof -ti tcp:8080 | xargs kill
 ```
 
-Then start the backend in one of three modes.
-
-**Payments off (the default).** Tasks are free. Skip steps 2 and 3 and give
-the Agent a wallet address in place of an API key:
+Then start it:
 
 ```sh
 go run ./cmd/unstuck -claim-window 30s -solve-window 60s
-export UNSTUCK_WALLET=<any Solana wallet address>   # in the Agent's terminal
-```
-
-**With real USDC Deposits.** The backend polls Solana mainnet every 5s:
-
-```sh
-go run ./cmd/unstuck -payments -claim-window 30s -solve-window 60s
-```
-
-**Payments on, without real USDC.** Deposit polling is off and free dev
-credit is on:
-
-```sh
-go run ./cmd/unstuck -payments -claim-window 30s -solve-window 60s -dev -rpc-url ""
 ```
 
 State lives in `unstuck.db` in the current directory (change it with
-`-db path`). Reuse the same file and your registration and Balance carry
-over.
+`-db path`).
 
-### 2. Register the Customer (once per database)
-
-Needed only with payments on, or to read `GET /v1/balance`. The pay CLI
-cannot sign messages, so export the keypair and let `unstuck-register` sign
-the challenge:
-
-```sh
-pay account export local                      # writes ./pay-account-local-<pubkey>.json
-go run ./cmd/unstuck-register -keypair ./pay-account-local-*.json
-rm ./pay-account-local-*.json                  # it holds the private key
-```
-
-It prints the API key once. Export it in every terminal that runs an Agent:
-
-```sh
-export UNSTUCK_API_KEY=unstuck_...
-```
-
-### 3. Fund the Balance
-
-Needed only with payments on.
-
-**Real Deposit.** Send USDC from the registered wallet to the service
-wallet. The backend sees it about 5s after confirmation:
-
-```sh
-pay send 0.05 CW82aTEMcqsqwLaxppzrpEnM41bC83R8JUXpZgYcrhGt --account local
-```
-
-pay adds a small network fee on top. Pass `--fee-within` to take it out of
-the amount instead.
-
-**Dev credit.** Works only when the backend runs with `-dev`:
-
-```sh
-curl -X POST -H "Authorization: Bearer $UNSTUCK_API_KEY" \
-  -d '{"amount":100000}' http://localhost:8080/v1/dev/credit
-```
-
-Check the Balance:
-
-```sh
-curl -H "Authorization: Bearer $UNSTUCK_API_KEY" http://localhost:8080/v1/balance
-```
-
-### 4. Open the tunnel (terminal 2)
+### 2. Open the tunnel (terminal 2)
 
 ```sh
 ngrok http 8080
@@ -465,13 +319,13 @@ Copy the `https://….ngrok-free.dev` URL. On the phone:
 
 1. Open the URL.
 2. ngrok's free tier shows a warning page the first time. Tap **Visit Site**.
-3. Enter the Solver's Solana wallet address and tap **Connect**. The status
-   line should read "Connected as …".
+3. The Queue page connects by itself. The status line should read
+   "Connected.".
 
 The phone can be on cellular. Only the phone uses the tunnel; the Agent
 talks to `http://localhost:8080`.
 
-### 5. Run an Agent (terminal 3)
+### 3. Run an Agent (terminal 3)
 
 ```sh
 cd bridge
@@ -483,15 +337,15 @@ npm run demo:recaptcha    # Google's reCAPTCHA demo page
 
 1. The Task appears in the Queue. Tap **Claim** within 30s.
 2. The Agent's page appears, with its URL and a countdown.
-3. Clear the Challenge: tap, drag the slider, or scroll with a mouse wheel on
-   desktop. To type, tap a field on the Agent's page, then use the
+3. Clear the Challenge: tap to click and swipe to scroll, as on any page.
+   To drag the slider, hold a finger still on it until the page's border
+   lights up, then move. With a mouse, click, drag and use the wheel. To type, tap a field on the Agent's page, then use the
    "Tap here to type" box (on a computer, just type). If the Task did not
    finish by itself, tap **Done** and the Agent checks the page.
-4. The phone shows "Solved!" (with payments on, "Solved! Earning of 0.008
-   USDC recorded.") and the Agent continues.
+4. The phone shows "Solved!" and the Agent continues.
 
-If the phone's connection drops, reopen the URL and connect with the same
-wallet before the solve window ends. The Session resumes.
+If the phone's connection drops, reopen the URL in the same browser before
+the solve window ends. The Session resumes.
 
 Options:
 
@@ -532,12 +386,11 @@ Needs [uv](https://docs.astral.sh/uv/), a TypeSafe key
 
 ```sh
 cd bridge
-TYPESAFE_API_KEY=… GEMINI_API_KEY=… UNSTUCK_WALLET=… npm run demo:jev
+TYPESAFE_API_KEY=… GEMINI_API_KEY=… npm run demo:jev
 ```
 
-With payments on, set `UNSTUCK_API_KEY` in place of `UNSTUCK_WALLET`.
 [jev_start_example.sh](jev_start_example.sh) is a launcher for the public
-backend: copy it and fill in the keys and the wallet address.
+backend: copy it and fill in the two keys.
 
 The first run launches a separate Chrome with its own profile in
 `~/.unstuck/jev-chrome` and a debugging port on 9335. Leave it open between
@@ -574,39 +427,14 @@ This cross-compiles `cmd/unstuck` for the instance, installs the binary and
 systemd unit, restarts the service and applies the Ingress. The database is
 kept. Follow logs with `ssh hubstream journalctl -u unstuck -f`.
 
-### 2. Register the Customer (once per database)
-
-Needed only when the unit runs with `-payments`. It does not today, so skip
-to [step 4](#4-run-the-agent-and-solve).
-
-```sh
-pay account export local
-go run ./cmd/unstuck-register -server https://unstuck.yuchia.dev -keypair ./pay-account-local-*.json
-rm ./pay-account-local-*.json
-export UNSTUCK_API_KEY=unstuck_...
-```
-
-The instance has its own database. On registration it credits every earlier
-Deposit from that wallet, even ones already spent against a local database.
-
-### 3. Fund and check the Balance
-
-Needed only with `-payments`. Make a real Deposit as in [local step 3](#3-fund-the-balance), then:
-
-```sh
-curl -H "Authorization: Bearer $UNSTUCK_API_KEY" https://unstuck.yuchia.dev/v1/balance
-```
-
-### 4. Run the Agent and solve
+### 2. Run the Agent and solve
 
 ```sh
 cd bridge
-export UNSTUCK_WALLET=<any Solana wallet address>
 UNSTUCK_URL=https://unstuck.yuchia.dev npm run demo:recaptcha
 ```
 
-Open `https://unstuck.yuchia.dev` on the phone, connect with the Solver's
-wallet, and Claim within 30s. The public backend gives the Solver 5 minutes
+Open `https://unstuck.yuchia.dev` on the phone and Claim within 30s. The public backend gives the Solver 5 minutes
 to clear the Challenge.
 
 ### Deployment notes
@@ -615,19 +443,17 @@ to clear the Challenge.
   Cloudflare connects to Traefik over TLS, and Traefik serves its default
   self-signed certificate.
 - **HTTPS only.** The Ingress ([deploy/ingress.yaml](deploy/ingress.yaml))
-  uses Traefik's `websecure` entrypoint only, so the API key and session
-  token never cross the internet in cleartext.
+  uses Traefik's `websecure` entrypoint only, so a session token or a
+  Solver's id never crosses the internet in cleartext.
 - **Not reachable directly.** The service
   ([deploy/unstuck.service](deploy/unstuck.service)) listens on the k3s pod
   bridge address `10.42.0.1:8080`. Traefik, the host and pods can reach it;
   the internet cannot. The instance's `cni0` must be `10.42.0.1`, the k3s
   default.
-- **No `-payments`.** The unit starts the backend with payments off, so
-  Tasks are free and an Agent needs only `UNSTUCK_WALLET`. Steps 2 and 3
-  apply once `-payments` is added to
-  [deploy/unstuck.service](deploy/unstuck.service).
-- **No `-dev`.** `POST /v1/dev/credit` returns 404. Balance comes only from
-  real Deposits.
+- **A database from the version with wallets and payments** is upgraded
+  when the backend starts. Its Tasks are kept. Its other tables (Customers,
+  Balances, Deposits, Earnings, Withdrawals) are left as they are and no
+  longer read.
 - **Keepalive pings.** The backend pings every socket every 20s. Cloudflare
   closes WebSockets idle for 100s, and a still page sends no frames.
 - **Renamed from Overpass.** On an instance still running `overpass.service`,
@@ -636,15 +462,8 @@ to clear the Challenge.
   the old service, copies its state to `/var/backups/overpass-<time>`, moves
   the database to `/var/lib/unstuck/unstuck.db`, and removes the old unit and
   the `overpass` Ingress. Later deploys skip it.
-- **Keep Traefik's access log off.** The Bridge's session token is in its
-  WebSocket URL.
-- **Withdrawals need the hot wallet's key.** Put the keypair at
-  `/etc/unstuck/payout-keypair.json` (owner root, mode 600) and hand it to the
-  service as a systemd credential: add
-  `LoadCredential=payout-keypair:/etc/unstuck/payout-keypair.json` and
-  `-payout-keypair ${CREDENTIALS_DIRECTORY}/payout-keypair` to
-  [deploy/unstuck.service](deploy/unstuck.service). The service runs as a
-  dynamic user, which can read only that copy.
+- **Keep Traefik's access log off.** The Bridge's session token and the
+  Solver's id are in their WebSocket URLs.
 
 ## Configuration
 
@@ -656,34 +475,23 @@ Flags for `cmd/unstuck`:
 | `-db`             | `unstuck.db`                         | SQLite path                                          |
 | `-claim-window`   | `60s`                                 | Time in the Queue before a Task Expires              |
 | `-solve-window`   | `120s`                                | Time after Claim before a Task Fails                 |
-| `-payments`       | off                                   | Charge Customers and pay Solvers. Off, see [Payments off](#payments-off) |
-| `-price`          | `10000`                               | USDC base units held per Task (0.01 USDC)            |
-| `-service-wallet` | `CW82aTE…GhGt`                        | Wallet that receives Deposits                        |
-| `-rpc-url`        | Solana mainnet                        | RPC polled for Deposits (empty turns polling off)    |
-| `-poll-interval`  | `5s`                                  | Deposit poll interval                                |
 | `-ping-interval`  | `20s`                                 | WebSocket keepalive (0 turns it off)                 |
 | `-stun`           | `stun:stun.l.google.com:19302`        | STUN URLs for direct Sessions (empty for none)       |
 | `-turn`           | none                                  | TURN URLs; needs `$UNSTUCK_TURN_SECRET` (coturn `static-auth-secret`) |
-| `-dev`            | off                                   | Turns on `POST /v1/dev/credit`                       |
-| `-payout-keypair` | none                                  | Hot wallet keypair file that pays Withdrawals (none turns them off); uses `-rpc-url` |
-| `-usdc-mint`      | mainnet USDC                          | Mint Withdrawals pay in                              |
-| `-min-withdrawal` | `100000`                              | Least a Solver receives per Withdrawal (0.10 USDC)   |
-| `-account-fee`    | `400000`                              | Kept back when the Solver's wallet has no USDC account (0.40 USDC) |
 
 `solve(page, options)` in the Bridge:
 
 | Option    | Default                                   | Meaning                                  |
 | --------- | ----------------------------------------- | ---------------------------------------- |
-| `apiKey`  | `$UNSTUCK_API_KEY`                       | Customer API key                         |
-| `wallet`  | `$UNSTUCK_WALLET`                        | Customer's Solana wallet address, sent when there is no API key; needs a backend with payments off |
 | `url`     | `$UNSTUCK_URL`, then `http://localhost:8080` | Backend URL                          |
 | `cleared` | reCAPTCHA check                           | `(page) => Promise<boolean>`: is the page unblocked? Polled. |
 | `verify`  | `cleared`                                 | `(page) => Promise<boolean>`: run once when the Solver taps Done |
 | `obstacle`| none                                      | One sentence (at most 200 characters) naming the Challenge; Solvers see it before they Claim |
 | `p2p`     | `true`                                    | Allow a direct WebRTC Session            |
 
-Tip: the Solver sees exactly the page's viewport and cannot scroll it on a
-phone. Keep the Challenge inside the viewport. A small portrait viewport such
+Tip: the Solver sees exactly the page's viewport and scrolls it by swiping,
+or with a mouse wheel. A Challenge inside the viewport is still quicker to
+clear. A small portrait viewport such
 as 480x720 keeps tap targets large.
 
 ## Troubleshooting
@@ -692,7 +500,6 @@ as 480x720 keeps tap targets large.
 | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
 | Phone can't reach `http://<laptop-ip>:8080` over Wi-Fi         | Venue Wi-Fi usually isolates clients. Use ngrok, or Tailscale: open `http://<tailscale ip -4>:8080`. |
 | Queue page stuck on "Connecting…"                              | Reload and tap **Visit Site** again. The ngrok cookie may have expired.                          |
-| `InsufficientBalanceError`                                     | Available Balance is below the Price. Fund it (step 3).                                          |
 | `TaskExpiredError`                                             | No Solver claimed in time. Run the Agent again.                                                  |
 | `TaskFailedError`                                              | The solve window passed, the Solver gave up, or the Bridge disconnected. Run again.              |
 | `address already in use`                                       | Something else is on 8080. See step 1.                                                           |

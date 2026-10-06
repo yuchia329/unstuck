@@ -2,6 +2,8 @@
 
 Status: draft, revised 2026-10-03. Nothing here is built.
 
+**Out of date since 2026-10-05.** The code no longer has wallets, Customers, API keys or payments: see [Change of 2026-10-05](production-plan.md#change-of-2026-10-05-no-wallets-or-payments-in-the-code) in the production plan. The table under [Where the code stands](#where-the-code-stands) is corrected for that. The slices are not: C1 (the payments flag) no longer applies as written, choices 6 and 7 and slices A1, A2 and A6 assume wallets, Customers and API keys that are gone, and every slice that names `solver_wallet`, the Ledger, Deposits, Earnings or Withdrawals needs a second look before it becomes a ticket.
+
 [production-plan.md](production-plan.md) records *what* was agreed for the public beta and why. This document says *how* to build it against the code as it stands at commit `961e5e1`: which tables, endpoints, messages and files change, in what order, and what blocks what. It is written to be split into tickets: every slice below has an id, is meant to land as one pull request with its tests, and names the slices that block it.
 
 Terms follow [CONTEXT.md](../CONTEXT.md). Each slice updates the glossary for the terms it changes, as listed under "Glossary changes" in the production plan.
@@ -33,9 +35,9 @@ Facts the slices below depend on.
 | Schema | Each package owns a `CREATE TABLE IF NOT EXISTS` string; [store.go](../internal/store/store.go) applies them; [task.go](../internal/task/task.go) adds columns by hand in `Migrate`. | The beta needs about twenty schema changes, several of them table rebuilds. A versioned migration runner comes first (F2). |
 | Task states | `pending → claimed → solved / failed`, `pending → expired`. The Failed reason exists only on the in-memory `Event`; it is not stored. Nor is the time of the Claim. | History, stats and webhooks need both stored (C3). No new states are needed: a requeue is `claimed → pending`. |
 | Claim window | One global `-claim-window` (30s on the server), set in `task.Config`. | Replaced by a per-Task `max_wait` (C2). |
-| Money | `task.Create` always places a Hold of `-price` (0.01 USDC) and returns 402 without Balance. The split is 80/20 in [ledger.go](../internal/ledger/ledger.go). | A Customer with no Deposit cannot create a Task. The payments flag (C1) is what makes the beta free. |
-| Solver identity | `GET /v1/queue?wallet=…` with no proof. The wallet string is the identity in `tasks.solver_wallet`, the Queue hub and the Session relay. | Stays as it is through Phase 1. A2 replaces it with an account. Until then abuse control is per IP only. |
-| Customer identity | `customers.wallet NOT NULL UNIQUE`, one `api_key_hash` per Customer, registration by a CLI that signs a challenge. | A1 puts an account in front of the Customer; A6 moves keys to their own table. |
+| Money | None since 2026-10-05. There is no Ledger, no price and no payment code; a Task is free. | The beta is free without a flag. C1 has no Ledger to build the Shadow price on. |
+| Solver identity | `GET /v1/queue?solver=…` with no proof. The id is 32 random hex characters that the Queue page makes up and keeps in the browser. It is the identity in `tasks.solver`, the Queue hub and the Session relay. | A2 replaces it with an account. Until then abuse control is per IP only. |
+| Customer identity | None since 2026-10-05. There is no `customers` table and no API key: `POST /v1/tasks` takes no credentials, and a Task records no Customer. | A1 and A6 create the Customer and its keys instead of migrating them. Anyone can create Tasks until then. |
 | Queue | The hub broadcasts every Pending Task to every connected Solver. | Team Tasks need a filter per Solver (T2). |
 | Bridge | TypeScript only, written against Playwright's `Page` (`page.mouse`, `page.keyboard`, `newCDPSession`). Frames come from `Page.startScreencast` and cover the whole viewport. Input is checked for shape, not position. | The CDP core (I2) and the boundary (B2) both rewrite the frame and input paths. |
 | Transport stats | `readBridge` logs relayed frame bytes per Session and discards them. | C9 stores them. |
